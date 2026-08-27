@@ -1,0 +1,7 @@
+# Shell scripts are executed by path on Linux/macOS (make demo, CI):
+# they must keep LF endings even when checked out on Windows, or the
+# kernel reads the shebang as "#!/bin/sh\r" and refuses to run them.
+*.sh text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+*.service text eol=lf

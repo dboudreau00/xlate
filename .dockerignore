@@ -1,0 +1,18 @@
+# The build context needs Go source, go.mod, and web/ — nothing else.
+# Above all it must never contain the runtime state file: it holds every
+# partner credential in plaintext, and `COPY . .` would bake it into the
+# build-stage layers of the image.
+*.state.json
+*.state.json.tmp
+*.audit.jsonl
+*.zip
+*.exe
+xlate
+livetest/
+demo/
+deploy/
+docs/
+.github/
+.git/
+.claude/
+*.md

@@ -1,0 +1,1171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xlate · admin</title>
+<style>
+  /* Light is the default; dark is opt-in via the topbar toggle and
+     remembered in localStorage. Every colour below is a variable so the
+     two themes differ only in this block. */
+  :root{
+    --bg:#f6f7f9; --panel:#ffffff; --raised:#f0f2f5; --line:#e3e7ec; --line2:#cdd4dd;
+    --txt:#1b2530; --dim:#5b6673; --faint:#8a95a1;
+    --sideA:#a86a12; --sideA-dim:#d9a24b; --sideB:#2563a8; --sideB-dim:#7fb0dd;
+    --ok:#1f7a45; --err:#c02c26; --warn:#a8730f;
+    --onaccent:#ffffff; --err-line:#e8b6b3; --knob:#ffffff;
+    --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.04);
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1014; --panel:#12161b; --raised:#171c22; --line:#242c35; --line2:#2e3945;
+    --txt:#c8d0d8; --dim:#7c8792; --faint:#525c66;
+    --sideA:#d9a24b; --sideA-dim:#8a6a34; --sideB:#5e9ed6; --sideB-dim:#3f688c;
+    --ok:#4fa96c; --err:#d96459; --warn:#d9a24b;
+    --onaccent:#14100a; --err-line:#4a2c29; --knob:#0d1014;
+    --shadow:none;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font:14px/1.5 var(--sans)}
+  ::selection{background:var(--sideB-dim);color:#fff}
+
+  /* ---------- chrome ---------- */
+  .topbar{display:flex;align-items:center;gap:14px;padding:10px 20px;
+    border-bottom:1px solid var(--line);background:var(--panel);
+    position:sticky;top:0;z-index:20}
+  .wordmark{font-family:var(--mono);font-size:16px;letter-spacing:.5px;color:var(--txt)}
+  .wordmark .x{color:var(--sideA)} .wordmark .arr{color:var(--dim)} .wordmark .b{color:var(--sideB)}
+  .ver{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .health{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);margin-left:auto}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--faint)}
+  .dot.up{background:var(--ok)} .dot.down{background:var(--err)}
+  .linkbtn{background:none;border:none;color:var(--dim);font:12px var(--sans);cursor:pointer;padding:4px 6px}
+  .linkbtn:hover{color:var(--txt)}
+
+  .tabs{display:flex;gap:2px;padding:0 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);
+    font:13px var(--sans);padding:10px 14px;cursor:pointer}
+  .tab:hover{color:var(--txt)}
+  .tab.active{color:var(--txt);border-bottom-color:var(--sideA)}
+
+  main{max-width:1060px;margin:0 auto;padding:22px 20px 80px}
+
+  /* ---------- dashboard ---------- */
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:12px;margin-bottom:18px}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 15px;
+    box-shadow:var(--shadow)}
+  .tile .k{font:600 10px/1 var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+  .tile .v{font-family:var(--mono);font-size:23px;line-height:1.25;margin-top:7px;color:var(--txt);
+    font-variant-numeric:tabular-nums}
+  .tile .s{font-size:11px;color:var(--faint);margin-top:2px}
+  .tile .v.good{color:var(--ok)} .tile .v.bad{color:var(--err)} .tile .v.warn{color:var(--warn)}
+
+  .chart{display:flex;align-items:flex-end;gap:2px;height:132px;padding:8px 2px 0;
+    border-bottom:1px solid var(--line2)}
+  .chart .col{flex:1 1 0;min-width:2px;display:flex;flex-direction:column;justify-content:flex-end;
+    height:100%;border-radius:2px 2px 0 0;overflow:hidden}
+  .chart .col i{display:block;width:100%}
+  .chart .col i.ok{background:var(--sideB)}
+  .chart .col i.bad{background:var(--err)}
+  .chart .col.empty{background:var(--raised);height:2px;align-self:flex-end;border-radius:1px}
+  .axis{display:flex;justify-content:space-between;font-size:10px;color:var(--faint);
+    font-family:var(--mono);margin-top:6px}
+  .legend{display:flex;gap:14px;font-size:11px;color:var(--dim);margin-top:10px;align-items:center}
+  .legend b{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+  .legend .ok b{background:var(--sideB)} .legend .bad b{background:var(--err)}
+  th.num,td.num{text-align:right;font-variant-numeric:tabular-nums}
+
+  /* ---------- field discovery ---------- */
+  .discstate{font:600 10px/1 var(--sans);letter-spacing:.1em;text-transform:uppercase;
+    border:1px solid var(--line2);border-radius:999px;padding:4px 9px;color:var(--dim)}
+  .discstate.on{color:var(--ok);border-color:var(--ok)}
+  .discgrid{width:100%;border-collapse:collapse;margin-top:12px}
+  .discgrid th{font:600 10px/1 var(--sans);letter-spacing:.12em;text-transform:uppercase;
+    color:var(--dim);text-align:left;padding:7px 8px;border-bottom:1px solid var(--line)}
+  .discgrid td{padding:6px 8px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12px}
+  .discgrid tr:last-child td{border-bottom:none}
+  .discgrid .t{color:var(--dim);font-size:11px}
+  .discgrid .unmappable td{color:var(--faint)}
+  .dirhead{display:flex;align-items:center;gap:8px;margin:16px 0 0}
+  .dirhead .eyebrow{margin:0}
+
+  /* ---------- primitives ---------- */
+  .eyebrow{font:600 10px/1 var(--sans);letter-spacing:.14em;text-transform:uppercase;color:var(--dim);margin:0 0 10px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:18px;
+    box-shadow:var(--shadow)}
+  .card.sideA{border-left:3px solid var(--sideA)}
+  .card.sideB{border-left:3px solid var(--sideB)}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .grow{flex:1}
+  label.f{display:block;font-size:11px;color:var(--dim);margin:10px 0 4px}
+  input[type=text],input[type=number],textarea,select{
+    width:100%;background:var(--bg);border:1px solid var(--line2);border-radius:6px;
+    color:var(--txt);font:13px var(--mono);padding:7px 9px;outline:none}
+  input:focus-visible,textarea:focus-visible,select:focus-visible,button:focus-visible{
+    outline:2px solid var(--sideB);outline-offset:1px}
+  textarea{resize:vertical;min-height:110px}
+  button.btn{background:var(--raised);border:1px solid var(--line2);border-radius:6px;
+    color:var(--txt);font:13px var(--sans);padding:7px 13px;cursor:pointer}
+  button.btn:hover{border-color:var(--dim)}
+  button.btn.primary{background:var(--sideA);border-color:var(--sideA);color:var(--onaccent);font-weight:600}
+  button.btn.primary:hover{filter:brightness(1.08)}
+  button.btn.danger{color:var(--err);border-color:var(--err-line)}
+  button.btn.danger:hover{border-color:var(--err)}
+  button.btn.small,button.tiny{font-size:12px;padding:4px 9px}
+  button.tiny{background:none;border:1px solid var(--line2);border-radius:5px;color:var(--dim);cursor:pointer;font-family:var(--sans)}
+  button.tiny:hover{color:var(--txt);border-color:var(--dim)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .hint{font-size:12px;color:var(--dim)}
+  .mono{font-family:var(--mono)}
+  code.inline{font-family:var(--mono);font-size:12px;background:var(--bg);border:1px solid var(--line);
+    border-radius:4px;padding:2px 6px}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{font:600 10px/1 var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--dim);
+    text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  .tablewrap{overflow-x:auto}
+
+  .chipA{color:var(--sideA);font-family:var(--mono)}
+  .chipB{color:var(--sideB);font-family:var(--mono)}
+  .dirchip{font-family:var(--mono);font-size:12px;white-space:nowrap}
+  .status-on{color:var(--ok)} .status-off{color:var(--faint)}
+  .st-2xx{color:var(--ok)} .st-4xx{color:var(--warn)} .st-5xx{color:var(--err)} .st-3xx{color:var(--dim)}
+
+  /* toggle */
+  .toggle{position:relative;display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--dim)}
+  .toggle input{position:absolute;opacity:0;pointer-events:none}
+  .toggle .track{width:34px;height:18px;border-radius:9px;background:var(--line2);position:relative;transition:background .15s}
+  .toggle .track::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
+    background:var(--dim);transition:transform .15s,background .15s}
+  .toggle input:checked + .track{background:var(--ok)}
+  .toggle input:checked + .track::after{transform:translateX(16px);background:var(--knob)}
+  .toggle input:focus-visible + .track{outline:2px solid var(--sideB);outline-offset:1px}
+
+  /* ---------- mapping grid (signature) ---------- */
+  .mapgrid{border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .maphead,.maprow{display:grid;grid-template-columns:1fr 44px 1fr 40px;align-items:center}
+  .maphead{background:var(--raised);border-bottom:1px solid var(--line)}
+  .maphead div{font:600 10px/1 var(--sans);letter-spacing:.12em;text-transform:uppercase;padding:9px 12px}
+  .maphead .ha{color:var(--sideA);border-right:1px solid var(--line)}
+  .maphead .hb{color:var(--sideB);border-right:1px solid var(--line)}
+  .maphead .hx,.maprow .mx{color:var(--faint);text-align:center;font-family:var(--mono)}
+  .maprow{border-bottom:1px solid var(--line);background:var(--panel)}
+  .maprow:last-child{border-bottom:none}
+  .maprow input{border:none;border-radius:0;background:transparent;padding:9px 12px}
+  .maprow input.ia{border-right:1px solid var(--line)}
+  .maprow input.ib{border-right:1px solid var(--line)}
+  .maprow input.ia:focus-visible{outline-offset:-2px;outline-color:var(--sideA)}
+  .maprow input.ib:focus-visible{outline-offset:-2px;outline-color:var(--sideB)}
+  .maprow .rm{background:none;border:none;color:var(--faint);cursor:pointer;font-size:15px;padding:6px}
+  .maprow .rm:hover{color:var(--err)}
+  /* value transforms + tripwire */
+  .maphead,.maprow{grid-template-columns:1fr 44px 1fr 34px 34px}
+  .maprow .fx{background:none;border:none;color:var(--faint);cursor:pointer;font:700 10px/1 var(--mono);letter-spacing:.06em;padding:6px 2px}
+  .maprow .fx:hover{color:inherit}
+  .maprow .fx.on{color:var(--sideA)}
+  .pairwrap{border-bottom:1px solid var(--line)}
+  .pairwrap:last-child{border-bottom:none}
+  .pairwrap .maprow{border-bottom:none}
+  .trow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px;border-top:1px dashed var(--line);background:var(--raised);font:12px var(--sans);color:var(--faint)}
+  .trow select,.trow .tcust{background:var(--panel);border:1px solid var(--line);border-radius:6px;color:inherit;padding:4px 7px;font:12px var(--mono)}
+  .trow .tlab-a{color:var(--sideA)} .trow .tlab-b{color:var(--sideB)}
+  .badge{display:inline-block;margin-left:8px;padding:2px 7px;border-radius:5px;font:700 9px/1.4 var(--mono);letter-spacing:.08em;vertical-align:1px}
+  .badge.locked{color:var(--err);border:1px solid var(--err)}
+  .badge.tripped{color:var(--sideA);border:1px solid var(--sideA)}
+  .twstrip{display:flex;align-items:center;gap:10px;margin:0 0 18px;padding:10px 14px;border:1px solid var(--err);border-radius:8px;font:13px var(--sans)}
+  .twstrip.calm{border-color:var(--line);color:var(--faint)}
+  .mapempty{padding:16px 12px;color:var(--dim);font-size:13px;background:var(--panel)}
+
+  .endpoints{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;margin-bottom:18px}
+  .tokrow{display:flex;gap:6px;align-items:center;margin-top:2px}
+  .tokrow input{flex:1;letter-spacing:.02em}
+
+  pre.out{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px;
+    font:12px/1.55 var(--mono);overflow-x:auto;margin:10px 0 0;white-space:pre}
+  .warnline{color:var(--warn);font-size:12px;font-family:var(--mono);margin-top:6px}
+  .okline{color:var(--ok);font-size:12px;margin-top:8px}
+  .errline{color:var(--err);font-size:12px;margin-top:8px}
+
+  .snip{margin-top:14px;padding-top:12px;border-top:1px dashed var(--line)}
+  .snip:first-of-type{margin-top:4px;padding-top:0;border-top:none}
+
+  /* ---------- gate + toast ---------- */
+  .gate{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:50}
+  .gatebox{width:min(360px,90vw);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:26px}
+  .gatebox .wordmark{font-size:20px;display:block;margin-bottom:4px}
+  .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--raised);
+    border:1px solid var(--line2);border-radius:8px;padding:9px 16px;font-size:13px;z-index:60;
+    opacity:0;pointer-events:none;transition:opacity .18s}
+  .toast.show{opacity:1}
+  .toast.err{border-color:var(--err);color:var(--err)}
+  .hidden{display:none !important}
+
+  .pagehead{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+  .pagehead h1{font:600 17px var(--sans);margin:0}
+  .idchip{font:12px var(--mono);color:var(--dim);background:var(--raised);border:1px solid var(--line);
+    border-radius:5px;padding:3px 8px}
+  .back{background:none;border:none;color:var(--dim);cursor:pointer;font:13px var(--sans);padding:4px 8px 4px 0}
+  .back:hover{color:var(--txt)}
+
+  @media (prefers-reduced-motion: reduce){
+    *{transition:none !important}
+  }
+</style>
+</head>
+<body>
+
+<div class="gate hidden" id="gate">
+  <div class="gatebox">
+    <span class="wordmark"><span class="x">xlate</span> <span class="arr">⇄</span></span>
+    <p class="hint" style="margin:4px 0 18px">Administrator access</p>
+    <label class="f" for="gate-token">Admin token</label>
+    <input type="password" id="gate-token" autocomplete="off" spellcheck="false">
+    <div class="errline hidden" id="gate-err">That token was not accepted.</div>
+    <div class="row" style="margin-top:16px">
+      <button class="btn primary" id="gate-go">Sign in</button>
+    </div>
+    <p class="hint" style="margin-top:16px">The token is printed when the server starts, or pinned with
+      <code class="inline">-admin-token</code> / <code class="inline">XLATE_ADMIN_TOKEN</code>.</p>
+  </div>
+</div>
+
+<header class="topbar">
+  <span class="wordmark"><span class="x">xlate</span> <span class="arr">⇄</span></span>
+  <span class="ver" id="ver"></span>
+  <span class="health"><span class="dot" id="healthdot"></span><span id="healthtxt">checking…</span></span>
+  <button class="linkbtn" id="theme" title="Switch theme">Dark</button>
+  <button class="linkbtn" id="signout">Sign out</button>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="dashboard">Dashboard</button>
+  <button class="tab" data-tab="accounts">Accounts</button>
+  <button class="tab" data-tab="activity">Activity</button>
+</nav>
+
+<main>
+  <!-- ============ dashboard ============ -->
+  <section id="view-dashboard">
+    <div class="pagehead">
+      <h1>Dashboard</h1>
+      <span class="grow"></span>
+      <label class="toggle"><input type="checkbox" id="dash-auto"><span class="track"></span>Auto-refresh</label>
+      <button class="btn small" id="btn-dash">Refresh</button>
+    </div>
+    <div class="tiles" id="dash-tiles"></div>
+    <div class="card">
+      <div class="eyebrow">Requests per minute · last hour</div>
+      <div class="chart" id="dash-chart"></div>
+      <div class="axis"><span>60m ago</span><span>30m</span><span>now</span></div>
+      <div class="legend">
+        <span class="ok"><b></b>delivered</span>
+        <span class="bad"><b></b>refused or failed</span>
+        <span class="grow"></span>
+        <span id="dash-note" class="hint"></span>
+      </div>
+    </div>
+    <div class="card" style="padding:0">
+      <div class="tablewrap"><table>
+        <thead><tr>
+          <th>Account</th><th class="num">Requests</th><th class="num">Delivered</th>
+          <th class="num">Refused</th><th class="num">Failed</th><th class="num">Avg ms</th>
+          <th class="num">Fields</th><th class="num">Data</th><th>Last seen</th>
+        </tr></thead>
+        <tbody id="dash-accounts-body"></tbody>
+      </table></div>
+      <div class="mapempty hidden" id="dash-empty">No traffic on this node yet.</div>
+    </div>
+  </section>
+
+  <!-- ============ accounts list ============ -->
+  <section id="view-accounts">
+    <div class="pagehead">
+      <h1>Accounts</h1>
+      <span class="grow"></span>
+      <button class="btn primary" id="btn-new">New account</button>
+    </div>
+    <div class="card" style="padding:0">
+      <div class="tablewrap"><table id="accounts-table">
+        <thead><tr>
+          <th>ID</th><th>Name</th><th>Endpoints</th><th>Fields</th><th>Status</th><th>Updated</th>
+        </tr></thead>
+        <tbody id="accounts-body"></tbody>
+      </table></div>
+      <div class="mapempty hidden" id="accounts-empty">No accounts yet. Create one to start translating.</div>
+    </div>
+  </section>
+
+  <!-- ============ editor ============ -->
+  <section id="view-editor" class="hidden">
+    <div class="pagehead">
+      <button class="back" id="btn-back">← Accounts</button>
+    </div>
+    <div class="pagehead">
+      <h1 id="ed-title">Account</h1>
+      <span class="idchip mono" id="ed-idchip"></span>
+      <span class="grow"></span>
+      <label class="toggle"><input type="checkbox" id="ed-enabled"><span class="track"></span><span id="ed-enabled-lbl">Enabled</span></label>
+    </div>
+    <div id="tw-strip" class="twstrip hidden"></div>
+
+    <div class="card">
+      <div class="row">
+        <div class="grow" style="min-width:220px">
+          <label class="f" for="ed-name">Name</label>
+          <input type="text" id="ed-name" spellcheck="false">
+        </div>
+        <div id="ed-idwrap" class="hidden" style="min-width:220px">
+          <label class="f" for="ed-id">Account ID <span class="hint">(lowercase, permanent)</span></label>
+          <input type="text" id="ed-id" spellcheck="false" placeholder="acme_psp">
+        </div>
+      </div>
+    </div>
+
+    <p class="eyebrow">Endpoints</p>
+    <div class="endpoints">
+      <div class="card sideA" style="margin:0">
+        <label class="f" for="ea-label"><span class="chipA">Side A</span> · label</label>
+        <input type="text" id="ea-label" spellcheck="false">
+        <label class="f" for="ea-url">Target URL <span class="hint">(where B→A traffic is delivered)</span></label>
+        <input type="text" id="ea-url" spellcheck="false" placeholder="https://a.example.com/webhook">
+        <label class="f">Inbound token <span class="hint">(A presents this to xlate)</span></label>
+        <div class="tokrow"><input type="text" id="ea-tin" readonly>
+          <button class="tiny" data-tok="ea-tin">Reveal</button>
+          <button class="tiny" data-copy="ea-tin">Copy</button>
+          <button class="tiny" data-rotate="a:inbound">Rotate</button></div>
+        <label class="f">Outbound token <span class="hint">(xlate presents this to A's target)</span></label>
+        <div class="tokrow"><input type="text" id="ea-tout" placeholder="none — sent without Authorization" spellcheck="false">
+          <button class="tiny" data-tok="ea-tout">Reveal</button>
+          <button class="tiny" data-copy="ea-tout">Copy</button>
+          <button class="tiny" data-rotate="a:outbound">Rotate</button></div>
+      </div>
+      <div class="card sideB" style="margin:0">
+        <label class="f" for="eb-label"><span class="chipB">Side B</span> · label</label>
+        <input type="text" id="eb-label" spellcheck="false">
+        <label class="f" for="eb-url">Target URL <span class="hint">(where A→B traffic is delivered)</span></label>
+        <input type="text" id="eb-url" spellcheck="false" placeholder="https://b.example.com/webhook">
+        <label class="f">Inbound token <span class="hint">(B presents this to xlate)</span></label>
+        <div class="tokrow"><input type="text" id="eb-tin" readonly>
+          <button class="tiny" data-tok="eb-tin">Reveal</button>
+          <button class="tiny" data-copy="eb-tin">Copy</button>
+          <button class="tiny" data-rotate="b:inbound">Rotate</button></div>
+        <label class="f">Outbound token <span class="hint">(xlate presents this to B's target)</span></label>
+        <div class="tokrow"><input type="text" id="eb-tout" placeholder="none — sent without Authorization" spellcheck="false">
+          <button class="tiny" data-tok="eb-tout">Reveal</button>
+          <button class="tiny" data-copy="eb-tout">Copy</button>
+          <button class="tiny" data-rotate="b:outbound">Rotate</button></div>
+      </div>
+    </div>
+
+    <p class="eyebrow">Field map</p>
+    <div class="mapgrid" style="margin-bottom:10px">
+      <div class="maphead">
+        <div class="ha" id="map-ha">Side A field</div>
+        <div class="hx">⇄</div>
+        <div class="hb" id="map-hb">Side B field</div>
+        <div></div>
+        <div></div>
+      </div>
+      <div id="map-rows"></div>
+      <div class="mapempty hidden" id="map-empty">No field pairs yet. Unmapped fields pass through unchanged.</div>
+    </div>
+    <div class="row" style="margin-bottom:18px">
+      <button class="btn small" id="btn-addpair">Add field pair</button>
+      <span class="hint">Dot paths reach nested fields, e.g. <code class="inline">customer.id</code>. <strong>fx</strong> adds a date transform — the value converts in flight, both directions.</span>
+    </div>
+
+    <p class="eyebrow">Options</p>
+    <div class="card">
+      <div class="row" style="gap:26px">
+        <label class="toggle"><input type="checkbox" id="ed-drop"><span class="track"></span>
+          Drop unmapped fields <span class="hint">(forward only what the map produces)</span></label>
+        <div>
+          <label class="f" for="ed-timeout" style="margin-top:0">Upstream timeout (seconds)</label>
+          <input type="number" id="ed-timeout" min="1" max="300" style="width:110px">
+        </div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-bottom:26px">
+      <button class="btn primary" id="btn-save">Save changes</button>
+      <span class="grow"></span>
+      <button class="btn danger" id="btn-delete">Delete account</button>
+    </div>
+
+    <div id="ed-tools">
+      <p class="eyebrow">Field discovery</p>
+      <div class="card">
+        <div class="row">
+          <span id="disc-state" class="discstate">off</span>
+          <span class="grow"></span>
+          <button class="btn small" id="btn-disc-on">Start · 60 min</button>
+          <button class="btn small hidden" id="btn-disc-off">Stop &amp; forget</button>
+          <button class="tiny hidden" id="btn-disc-clear">Clear observations</button>
+          <button class="tiny" id="btn-disc-refresh">Refresh</button>
+        </div>
+        <p class="hint" style="margin:8px 0 0">
+          Records the <em>shape</em> of inbound payloads — paths and JSON types — so you can build a
+          map from what a partner actually sends. Values are never recorded, and observations are
+          held in memory only until the window closes.
+        </p>
+        <div id="disc-out"></div>
+      </div>
+
+      <p class="eyebrow">Dry run</p>
+      <div class="card">
+        <div class="row">
+          <select id="test-dir" style="width:auto"></select>
+          <span class="hint">Runs the last saved configuration. Nothing is forwarded.</span>
+        </div>
+        <label class="f" for="test-json">Payload</label>
+        <textarea id="test-json" spellcheck="false"></textarea>
+        <div class="row" style="margin-top:10px">
+          <button class="btn" id="btn-test">Preview translation</button>
+          <button class="tiny" id="btn-sample">Insert sample</button>
+        </div>
+        <div id="test-out"></div>
+      </div>
+
+      <p class="eyebrow">Integration</p>
+      <div class="card" id="integration"></div>
+    </div>
+  </section>
+
+  <!-- ============ activity ============ -->
+  <section id="view-activity" class="hidden">
+    <div class="pagehead">
+      <h1>Activity</h1>
+      <span class="grow"></span>
+      <select id="log-account" style="width:auto"><option value="">All accounts</option></select>
+      <label class="toggle"><input type="checkbox" id="log-auto"><span class="track"></span>Auto-refresh</label>
+      <button class="btn small" id="btn-logs">Refresh</button>
+    </div>
+    <p class="hint" style="margin:-6px 0 12px">Metadata only — payload bodies are never recorded. Newest first, last <span id="log-cap">500</span> requests held in memory.</p>
+    <div class="card" style="padding:0">
+      <div class="tablewrap"><table>
+        <thead><tr>
+          <th>Time</th><th>Account</th><th>Dir</th><th>Status</th><th>Upstream</th>
+          <th>ms</th><th>In</th><th>Out</th><th>Fields</th><th>Note</th>
+        </tr></thead>
+        <tbody id="log-body"></tbody>
+      </table></div>
+      <div class="mapempty hidden" id="log-empty">No traffic yet.</div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+
+const S = {
+  token: sessionStorage.getItem("xlate_admin") || "",
+  accounts: [],
+  E: null,          // working copy in the editor
+  createMode: false,
+  pollTimer: null,
+};
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+let toastTimer = null;
+function toast(msg, isErr) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "toast show" + (isErr ? " err" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.className = "toast", 2600);
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    ...opts,
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + S.token,
+      ...(opts.headers || {}),
+    },
+  });
+  if (r.status === 401) { gate(true, true); throw new Error("unauthorized"); }
+  if (r.status === 204) return null;
+  let body = null;
+  try { body = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error((body && body.error) || ("HTTP " + r.status));
+  return body;
+}
+
+/* ---------- gate ---------- */
+function gate(show, failed) {
+  const g = $("gate");
+  const wasShown = !g.classList.contains("hidden");
+  g.classList.toggle("hidden", !show);
+  $("gate-err").classList.toggle("hidden", !failed);
+  if (show) {
+    // Auth is gone: silence the refresh timers, or their 401s call back
+    // into this gate every 5 seconds and wipe whatever the operator is
+    // typing into the token field.
+    stopPoll(); stopDashPoll();
+  }
+  if (show && !wasShown) { $("gate-token").value = ""; $("gate-token").focus(); }
+}
+async function signIn() {
+  S.token = $("gate-token").value.trim();
+  try {
+    await api("/api/admin/accounts");
+    sessionStorage.setItem("xlate_admin", S.token);
+    gate(false);
+    boot();
+  } catch (_) { /* api() re-shows the gate with the error line */ }
+}
+$("gate-go").addEventListener("click", signIn);
+$("gate-token").addEventListener("keydown", e => { if (e.key === "Enter") signIn(); });
+$("signout").addEventListener("click", () => {
+  S.token = ""; sessionStorage.removeItem("xlate_admin"); gate(true, false);
+});
+
+/* ---------- theme ---------- */
+/* Light by default; the choice is remembered per browser. */
+function applyTheme(t) {
+  document.documentElement.setAttribute("data-theme", t);
+  $("theme").textContent = t === "dark" ? "Light" : "Dark";
+  try { localStorage.setItem("xlate_theme", t); } catch (_) {}
+}
+applyTheme((() => {
+  try { return localStorage.getItem("xlate_theme") === "dark" ? "dark" : "light"; }
+  catch (_) { return "light"; }
+})());
+$("theme").addEventListener("click", () =>
+  applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark"));
+
+/* ---------- tabs ---------- */
+function showView(name) {
+  ["dashboard", "accounts", "editor", "activity"].forEach(v =>
+    $("view-" + v).classList.toggle("hidden", v !== name));
+  document.querySelectorAll(".tab").forEach(b =>
+    b.classList.toggle("active", b.dataset.tab === (name === "editor" ? "accounts" : name)));
+  if (name !== "activity") stopPoll();
+  if (name !== "dashboard") stopDashPoll();
+}
+document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => {
+  showView(b.dataset.tab);
+  if (b.dataset.tab === "dashboard") loadDash();
+  if (b.dataset.tab === "accounts") loadAccounts();
+  if (b.dataset.tab === "activity") loadLogs();
+}));
+
+/* ---------- health ---------- */
+async function health() {
+  try {
+    const r = await fetch("/healthz");
+    const h = await r.json();
+    $("healthdot").className = "dot up";
+    $("healthtxt").textContent = "up · " + h.accounts + " account" + (h.accounts === 1 ? "" : "s");
+    $("ver").textContent = "v" + h.version;
+  } catch (_) {
+    $("healthdot").className = "dot down";
+    $("healthtxt").textContent = "unreachable";
+  }
+}
+
+/* ---------- accounts list ---------- */
+async function loadAccounts() {
+  S.accounts = await api("/api/admin/accounts") || [];
+  let tw = {};
+  try { tw = await api("/api/admin/tripwire") || {}; } catch (_) {}
+  const tb = $("accounts-body");
+  tb.innerHTML = "";
+  $("accounts-empty").classList.toggle("hidden", S.accounts.length > 0);
+  for (const a of S.accounts) {
+    const st = tw[a.id] || {};
+    let badge = "";
+    if (st.state === "locked") badge = `<span class="badge locked">LOCKED ${st.unlock_in_sec || 0}s</span>`;
+    else if (st.state === "tripped") badge = `<span class="badge tripped">TRIPPED</span>`;
+    else if (!a.enabled && (st.trips || 0) > 0) badge = `<span class="badge locked">FROZEN</span>`;
+    const tr = document.createElement("tr");
+    tr.style.cursor = "pointer";
+    tr.innerHTML =
+      `<td class="mono">${esc(a.id)}</td>` +
+      `<td>${esc(a.name)}</td>` +
+      `<td><span class="chipA">${esc(a.a.label)}</span> <span style="color:var(--faint)">⇄</span> ` +
+      `<span class="chipB">${esc(a.b.label)}</span></td>` +
+      `<td class="mono">${a.map ? a.map.length : 0}</td>` +
+      `<td><span class="${a.enabled ? "status-on" : "status-off"}">${a.enabled ? "enabled" : "disabled"}</span>${badge}</td>` +
+      `<td class="hint">${esc(fmtTime(a.updated_at))}</td>`;
+    tr.addEventListener("click", () => openEditor(a.id));
+    tb.appendChild(tr);
+  }
+  // keep the activity filter in sync
+  const sel = $("log-account");
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">All accounts</option>' +
+    S.accounts.map(a => `<option value="${esc(a.id)}">${esc(a.id)}</option>`).join("");
+  sel.value = cur;
+}
+$("btn-new").addEventListener("click", () => openEditor(null));
+
+/* ---------- editor ---------- */
+async function openEditor(id) {
+  if (id) {
+    S.E = await api("/api/admin/accounts/" + encodeURIComponent(id));
+    if (!Array.isArray(S.E.map)) S.E.map = [];   // belt and braces
+    S.createMode = false;
+    try { S.tw = ((await api("/api/admin/tripwire")) || {})[id] || null; } catch (_) { S.tw = null; }
+  } else {
+    S.tw = null;
+    S.E = { id: "", name: "", enabled: true,
+      a: { label: "System A", target_url: "", inbound_token: "", outbound_token: "" },
+      b: { label: "System B", target_url: "", inbound_token: "", outbound_token: "" },
+      map: [{ a: "", b: "" }], drop_unmapped: false, timeout_sec: 15 };
+    S.createMode = true;
+  }
+  renderEditor();
+  showView("editor");
+}
+$("btn-back").addEventListener("click", () => { showView("accounts"); loadAccounts(); });
+
+function renderEditor() {
+  const E = S.E, create = S.createMode;
+  $("ed-title").textContent = create ? "New account" : E.name;
+  $("ed-idchip").textContent = E.id;
+  $("ed-idchip").classList.toggle("hidden", create);
+  $("ed-idwrap").classList.toggle("hidden", !create);
+  $("ed-id").value = E.id;
+  $("ed-name").value = E.name;
+  $("ed-enabled").checked = !!E.enabled;
+  $("ea-label").value = E.a.label; $("eb-label").value = E.b.label;
+  $("ea-url").value = E.a.target_url; $("eb-url").value = E.b.target_url;
+  setTok("ea-tin", E.a.inbound_token); setTok("ea-tout", E.a.outbound_token);
+  setTok("eb-tin", E.b.inbound_token); setTok("eb-tout", E.b.outbound_token);
+  $("ed-drop").checked = !!E.drop_unmapped;
+  $("ed-timeout").value = E.timeout_sec || 15;
+  $("btn-delete").classList.toggle("hidden", create);
+  $("ed-tools").classList.toggle("hidden", create);
+  document.querySelectorAll("[data-rotate]").forEach(b => b.disabled = create);
+  renderMapRows();
+  refreshSideHeads();
+  renderTwStrip();
+  if (!create) { renderTester(); renderIntegration(); loadDiscovery(); }
+}
+
+/* tripwire strip */
+function renderTwStrip() {
+  const el = $("tw-strip");
+  if (S.createMode) { el.classList.add("hidden"); return; }
+  const st = S.tw || { state: "armed", count: 0 };
+  el.classList.remove("hidden");
+  el.classList.toggle("calm", st.state === "armed");
+  let msg = "Tripwire armed";
+  if (st.state === "locked") msg = `Tripwire LOCKED — ingest answers 429 for ~${st.unlock_in_sec || 0}s`;
+  else if (st.state === "tripped") msg = "Tripwire tripped";
+  if ((st.count || 0) > 0 && st.state === "armed") msg += ` · ${st.count} refused attempt(s) in window`;
+  if ((st.trips || 0) > 0) msg += ` · ${st.trips} trip(s) since start`;
+  const hot = st.state !== "armed" || (st.trips || 0) > 0 || (st.count || 0) > 0;
+  el.innerHTML = `<span>${esc(msg)}</span><span class="grow"></span>` +
+    (hot ? `<button class="btn small" id="btn-twreset">Reset tripwire</button>` : "");
+  const b = document.getElementById("btn-twreset");
+  if (b) b.addEventListener("click", async () => {
+    try {
+      const r = await api(`/api/admin/accounts/${encodeURIComponent(S.E.id)}/tripwire/reset`, { method: "POST" });
+      S.tw = r.tripwire;
+      renderTwStrip();
+      toast("Tripwire reset");
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
+function refreshSideHeads() {
+  $("map-ha").textContent = ($("ea-label").value || "Side A") + " field";
+  $("map-hb").textContent = ($("eb-label").value || "Side B") + " field";
+}
+$("ea-label").addEventListener("input", refreshSideHeads);
+$("eb-label").addEventListener("input", refreshSideHeads);
+
+/* token fields: masked by default, reveal toggles */
+const revealed = new Set();
+function setTok(id, val) {
+  const el = $(id);
+  el.dataset.real = val || "";
+  revealed.delete(id);
+  el.value = val ? mask(val) : "";
+}
+function mask(t) { return t.length > 8 ? "•".repeat(t.length - 6) + t.slice(-6) : "•".repeat(t.length); }
+document.querySelectorAll("[data-tok]").forEach(b => b.addEventListener("click", () => {
+  const id = b.dataset.tok, el = $(id);
+  if (revealed.has(id)) { revealed.delete(id); el.value = el.dataset.real ? mask(el.dataset.real) : ""; b.textContent = "Reveal"; }
+  else { revealed.add(id); el.value = el.dataset.real; b.textContent = "Hide"; }
+}));
+document.querySelectorAll("[data-copy]").forEach(b => b.addEventListener("click", () =>
+  copyText($(b.dataset.copy).dataset.real)));
+
+/* Outbound tokens are partner-issued credentials, so unlike inbound
+   tokens (minted here, rotate-only) they must be typeable. Focus reveals
+   the real value so edits are WYSIWYG rather than typed over a mask; an
+   emptied field means "send without Authorization" and is saved as an
+   explicit clear. */
+["ea-tout", "eb-tout"].forEach(id => {
+  const el = $(id);
+  el.addEventListener("focus", () => {
+    if (!revealed.has(id)) {
+      revealed.add(id);
+      el.value = el.dataset.real;
+      const b = document.querySelector(`[data-tok="${id}"]`);
+      if (b) b.textContent = "Hide";
+    }
+  });
+  el.addEventListener("input", () => { el.dataset.real = el.value.trim(); });
+});
+async function copyText(t) {
+  if (!t) { toast("Nothing to copy", true); return; }
+  try { await navigator.clipboard.writeText(t); toast("Copied"); }
+  catch (_) { toast("Copy blocked — reveal and copy manually", true); }
+}
+
+document.querySelectorAll("[data-rotate]").forEach(b => b.addEventListener("click", async () => {
+  const [side, kind] = b.dataset.rotate.split(":");
+  const ep = side === "a" ? S.E.a : S.E.b;
+  const who = (side === "a" ? $("ea-label").value : $("eb-label").value) || ("side " + side.toUpperCase());
+  if (!confirm(`Rotate the ${kind} token for ${who}? The current token stops working immediately.`)) return;
+  try {
+    const r = await api(`/api/admin/accounts/${encodeURIComponent(S.E.id)}/rotate`,
+      { method: "POST", body: JSON.stringify({ side, kind }) });
+    ep[kind === "inbound" ? "inbound_token" : "outbound_token"] = r.token;
+    setTok((side === "a" ? "ea" : "eb") + (kind === "inbound" ? "-tin" : "-tout"), r.token);
+    renderIntegration();
+    toast("Token rotated and saved");
+  } catch (e) { toast(e.message, true); }
+}));
+
+/* mapping grid */
+const DATE_FMTS = ["rfc3339", "rfc3339nano", "date", "datetime", "rfc1123", "unix", "unix_ms"];
+function fmtCtl(i, side, val) {
+  const custom = val !== undefined && val !== "" && !DATE_FMTS.includes(val);
+  return `<select data-i="${i}" data-tside="${side}">` +
+    DATE_FMTS.map(f => `<option value="${f}"${f === val ? " selected" : ""}>${f}</option>`).join("") +
+    `<option value="__custom"${custom ? " selected" : ""}>custom…</option></select>` +
+    `<input class="tcust${custom ? "" : " hidden"}" data-i="${i}" data-tside="${side}" ` +
+    `value="${esc(custom ? val : "")}" placeholder="02/01/2006 15:04" spellcheck="false" style="width:150px">`;
+}
+function renderMapRows() {
+  const wrap = $("map-rows");
+  wrap.innerHTML = "";
+  $("map-empty").classList.toggle("hidden", S.E.map.length > 0);
+  S.E.map.forEach((p, i) => {
+    const box = document.createElement("div");
+    box.className = "pairwrap";
+    const t = p.transform;
+    let html =
+      `<div class="maprow">` +
+      `<input class="ia" data-i="${i}" data-side="a" value="${esc(p.a)}" placeholder="payment_id" spellcheck="false">` +
+      `<div class="mx">⇄</div>` +
+      `<input class="ib" data-i="${i}" data-side="b" value="${esc(p.b)}" placeholder="payment_proof" spellcheck="false">` +
+      `<button class="fx${t ? " on" : ""}" title="${t ? "Remove date transform" : "Add date transform: convert the value in flight, both directions"}">fx</button>` +
+      `<button class="rm" title="Remove pair" aria-label="Remove pair">×</button>` +
+      `</div>`;
+    if (t) {
+      html += `<div class="trow"><span>date ·</span>` +
+        `<span class="tlab-a">${esc($("ea-label").value || "A")}</span>` + fmtCtl(i, "a", t.a_format) +
+        `<span>⇄</span>` +
+        `<span class="tlab-b">${esc($("eb-label").value || "B")}</span>` + fmtCtl(i, "b", t.b_format) +
+        `</div>`;
+    }
+    box.innerHTML = html;
+    box.querySelectorAll(".maprow input").forEach(inp => inp.addEventListener("input", () => {
+      S.E.map[+inp.dataset.i][inp.dataset.side] = inp.value;
+    }));
+    box.querySelector(".rm").addEventListener("click", () => { S.E.map.splice(i, 1); renderMapRows(); });
+    box.querySelector(".fx").addEventListener("click", () => {
+      if (S.E.map[i].transform) delete S.E.map[i].transform;
+      else S.E.map[i].transform = { kind: "date", a_format: "rfc3339", b_format: "unix" };
+      renderMapRows();
+    });
+    box.querySelectorAll(".trow select").forEach(sel => sel.addEventListener("change", () => {
+      // No re-render here: rebuilding the row would re-infer the
+      // custom/named state from the (still empty) model value, snap the
+      // select back to the first option, and hide the input the user is
+      // about to type into. Toggle the one input in place instead.
+      const tr = S.E.map[+sel.dataset.i].transform, k = sel.dataset.tside + "_format";
+      const c = box.querySelector(`.tcust[data-i="${sel.dataset.i}"][data-tside="${sel.dataset.tside}"]`);
+      if (sel.value === "__custom") {
+        tr[k] = c ? c.value : "";
+        if (c) { c.classList.remove("hidden"); c.focus(); }
+      } else {
+        tr[k] = sel.value;
+        if (c) c.classList.add("hidden");
+      }
+    }));
+    box.querySelectorAll(".trow .tcust").forEach(inp => inp.addEventListener("input", () => {
+      S.E.map[+inp.dataset.i].transform[inp.dataset.tside + "_format"] = inp.value;
+    }));
+    wrap.appendChild(box);
+  });
+}
+$("btn-addpair").addEventListener("click", () => {
+  S.E.map.push({ a: "", b: "" });
+  renderMapRows();
+  const rows = $("map-rows").querySelectorAll(".ia");
+  if (rows.length) rows[rows.length - 1].focus();
+});
+
+function collect() {
+  const E = S.E;
+  if (S.createMode) E.id = $("ed-id").value.trim().toLowerCase();
+  E.name = $("ed-name").value;
+  E.enabled = $("ed-enabled").checked;
+  E.a.label = $("ea-label").value; E.b.label = $("eb-label").value;
+  E.a.target_url = $("ea-url").value.trim(); E.b.target_url = $("eb-url").value.trim();
+  E.drop_unmapped = $("ed-drop").checked;
+  E.timeout_sec = parseInt($("ed-timeout").value, 10) || 15;
+  // Inbound tokens: blank means "keep stored" server-side; send what we
+  // hold. Outbound tokens are editable here, so the console always
+  // expresses explicit state: an emptied field is sent as the "none"
+  // sentinel (clear — forward without Authorization), never as blank,
+  // because blank would silently keep the old credential.
+  E.a.inbound_token = $("ea-tin").dataset.real;
+  E.b.inbound_token = $("eb-tin").dataset.real;
+  E.a.outbound_token = $("ea-tout").dataset.real || "none";
+  E.b.outbound_token = $("eb-tout").dataset.real || "none";
+}
+
+$("btn-save").addEventListener("click", async () => {
+  collect();
+  try {
+    if (S.createMode) {
+      S.E = await api("/api/admin/accounts", { method: "POST", body: JSON.stringify(S.E) });
+      S.createMode = false;
+      toast("Account created");
+    } else {
+      S.E = await api("/api/admin/accounts/" + encodeURIComponent(S.E.id),
+        { method: "PUT", body: JSON.stringify(S.E) });
+      toast("Saved");
+    }
+    renderEditor();
+  } catch (e) { toast(e.message, true); }
+});
+
+$("btn-delete").addEventListener("click", async () => {
+  if (!confirm(`Delete account "${S.E.id}"? Both ingest URLs stop working immediately.`)) return;
+  try {
+    await api("/api/admin/accounts/" + encodeURIComponent(S.E.id), { method: "DELETE" });
+    toast("Account deleted");
+    showView("accounts");
+    loadAccounts();
+  } catch (e) { toast(e.message, true); }
+});
+
+/* ---------- field discovery ---------- */
+/* Shows the shape of what a partner is sending, so a map can be built
+   from real traffic. One click per row turns an observed path into a
+   mapping row, with the other side left blank to fill in. */
+async function loadDiscovery() {
+  if (S.createMode || !S.E.id) return;
+  try { S.disc = await api(`/api/admin/accounts/${encodeURIComponent(S.E.id)}/discover`); }
+  catch (e) { toast(e.message, true); return; }
+  renderDiscovery();
+}
+
+function renderDiscovery() {
+  const d = S.disc;
+  if (!d) return;
+  const active = !!d.active;
+  const st = $("disc-state");
+  st.textContent = active ? "recording" : "off";
+  st.classList.toggle("on", active);
+  if (active && d.until) st.title = "until " + fmtTime(d.until);
+
+  $("btn-disc-on").classList.toggle("hidden", active);
+  $("btn-disc-off").classList.toggle("hidden", !active);
+  $("btn-disc-clear").classList.toggle("hidden", !active);
+
+  const side = (dir) => dir === "a2b" ? (S.E.a.label || "A") : (S.E.b.label || "B");
+  let html = "";
+  for (const dir of ["a2b", "b2a"]) {
+    const rep = d[dir] || { fields: [], requests: 0 };
+    const fields = rep.fields || [];
+    if (!fields.length && !rep.requests) continue;
+    html += `<div class="dirhead"><p class="eyebrow">${esc(side(dir))} → ${esc(dir)}</p>` +
+      `<span class="hint">${rep.requests} request${rep.requests === 1 ? "" : "s"} observed` +
+      (rep.truncated ? " · list truncated" : "") + `</span></div>`;
+    if (!fields.length) { html += `<p class="hint">Nothing recorded yet.</p>`; continue; }
+    html += `<table class="discgrid"><thead><tr>
+        <th>Path</th><th>Type</th><th class="num">Seen</th><th style="width:1%"></th>
+      </tr></thead><tbody>` +
+      fields.map(f => {
+        const types = (f.types || []).join(", ");
+        const can = f.mappable && !f.path.includes("{*}");
+        return `<tr class="${can ? "" : "unmappable"}">
+          <td>${esc(f.path)}</td>
+          <td class="t">${esc(types)}</td>
+          <td class="num">${f.count}</td>
+          <td>${can
+            ? `<button class="tiny" data-addpath="${esc(f.path)}" data-adddir="${dir}">Add pair</button>`
+            : `<span class="hint">not mappable</span>`}</td>
+        </tr>`;
+      }).join("") + `</tbody></table>`;
+  }
+  if (!html) {
+    html = `<p class="hint" style="margin-top:12px">${active
+      ? "Waiting for the partner to send something."
+      : "Start discovery, then have the partner POST. Requests that cannot be forwarded yet still reveal their fields."}</p>`;
+  }
+  $("disc-out").innerHTML = html;
+
+  $("disc-out").querySelectorAll("[data-addpath]").forEach(b =>
+    b.addEventListener("click", () => addPairFromDiscovery(b.dataset.addpath, b.dataset.adddir)));
+}
+
+/* a2b paths are side A's vocabulary, b2a paths are side B's. */
+function addPairFromDiscovery(path, dir) {
+  const key = dir === "a2b" ? "a" : "b";
+  if (S.E.map.some(p => p[key] === path)) { toast(`"${path}" is already mapped`); return; }
+  const blank = S.E.map.find(p => !p.a && !p.b);
+  if (blank) blank[key] = path; else S.E.map.push({ a: key === "a" ? path : "", b: key === "b" ? path : "" });
+  renderMapRows();
+  toast(`Added ${path} — fill in the other side, then Save`);
+  const rows = $("map-rows").querySelectorAll(key === "a" ? ".ib" : ".ia");
+  if (rows.length) rows[rows.length - 1].focus();
+}
+
+async function setDiscovery(minutes) {
+  try {
+    S.disc = await api(`/api/admin/accounts/${encodeURIComponent(S.E.id)}/discover`,
+      { method: "POST", body: JSON.stringify({ minutes }) });
+    renderDiscovery();
+    toast(minutes ? "Discovery recording" : "Discovery off — observations forgotten");
+  } catch (e) { toast(e.message, true); }
+}
+$("btn-disc-on").addEventListener("click", () => setDiscovery(60));
+$("btn-disc-off").addEventListener("click", () => setDiscovery(0));
+$("btn-disc-refresh").addEventListener("click", loadDiscovery);
+$("btn-disc-clear").addEventListener("click", async () => {
+  try {
+    S.disc = await api(`/api/admin/accounts/${encodeURIComponent(S.E.id)}/discover`, { method: "DELETE" });
+    renderDiscovery();
+    toast("Observations cleared");
+  } catch (e) { toast(e.message, true); }
+});
+
+/* dry run */
+function renderTester() {
+  const E = S.E;
+  $("test-dir").innerHTML =
+    `<option value="a2b">${esc(E.a.label)} → ${esc(E.b.label)} (a2b)</option>` +
+    `<option value="b2a">${esc(E.b.label)} → ${esc(E.a.label)} (b2a)</option>`;
+  if (!$("test-json").value) insertSample();
+  $("test-out").innerHTML = "";
+}
+function insertSample() {
+  const dir = $("test-dir").value, o = {};
+  for (const p of S.E.map) {
+    const f = dir === "a2b" ? p.a : p.b;
+    if (f && !f.includes(".")) o[f] = "example";
+  }
+  if (!Object.keys(o).length) o.example_field = "value";
+  $("test-json").value = JSON.stringify(o, null, 2);
+}
+$("btn-sample").addEventListener("click", insertSample);
+$("test-dir").addEventListener("change", () => { insertSample(); $("test-out").innerHTML = ""; });
+$("btn-test").addEventListener("click", async () => {
+  let payload;
+  try { payload = JSON.parse($("test-json").value); }
+  catch (_) { $("test-out").innerHTML = `<div class="errline">Payload is not valid JSON.</div>`; return; }
+  try {
+    const r = await api(`/api/admin/accounts/${encodeURIComponent(S.E.id)}/test`,
+      { method: "POST", body: JSON.stringify({ direction: $("test-dir").value, payload }) });
+    let html = `<div class="okline">${r.applied} field${r.applied === 1 ? "" : "s"} translated</div>`;
+    html += `<pre class="out">${esc(JSON.stringify(r.translated, null, 2))}</pre>`;
+    for (const w of r.warnings) html += `<div class="warnline">⚠ ${esc(w)}</div>`;
+    $("test-out").innerHTML = html;
+  } catch (e) { $("test-out").innerHTML = `<div class="errline">${esc(e.message)}</div>`; }
+});
+
+/* integration snippets */
+function renderIntegration() {
+  const E = S.E, base = location.origin;
+  const block = (dir, from, to, tok) => {
+    const url = `${base}/t/${E.id}/${dir}`;
+    const curl = `curl -X POST ${url} \\\n  -H 'Authorization: Bearer ${tok || "<inbound token>"}' \\\n  -H 'Content-Type: application/json' \\\n  -d '{"field":"value"}'`;
+    const curlMasked = curl.replace(tok || "\u0000", tok ? mask(tok) : "<inbound token>");
+    return `<div class="snip">
+      <div class="dirchip" style="margin-bottom:6px">` +
+      `<span class="${dir === "a2b" ? "chipA" : "chipB"}">${esc(from)}</span>` +
+      ` <span style="color:var(--faint)">→</span> ` +
+      `<span class="${dir === "a2b" ? "chipB" : "chipA"}">${esc(to)}</span></div>
+      <div class="hint">${esc(from)} POSTs here with its inbound token; xlate translates and delivers to ${esc(to)}. The JSON response comes back in ${esc(from)}'s own field names.</div>
+      <pre class="out">${esc(curlMasked)}</pre>
+      <div class="row" style="margin-top:8px">
+        <button class="tiny" data-curl="${dir}">Copy curl with token</button>
+        <button class="tiny" data-url="${esc(url)}">Copy URL</button>
+      </div></div>`;
+  };
+  $("integration").innerHTML =
+    block("a2b", E.a.label, E.b.label, E.a.inbound_token) +
+    block("b2a", E.b.label, E.a.label, E.b.inbound_token);
+  $("integration").querySelectorAll("[data-curl]").forEach(b => b.addEventListener("click", () => {
+    const dir = b.dataset.curl;
+    const tok = dir === "a2b" ? S.E.a.inbound_token : S.E.b.inbound_token;
+    copyText(`curl -X POST ${base}/t/${S.E.id}/${dir} \\\n  -H 'Authorization: Bearer ${tok}' \\\n  -H 'Content-Type: application/json' \\\n  -d '{"field":"value"}'`);
+  }));
+  $("integration").querySelectorAll("[data-url]").forEach(b =>
+    b.addEventListener("click", () => copyText(b.dataset.url)));
+}
+
+/* ---------- activity ---------- */
+function fmtTime(t) {
+  if (!t) return "";
+  const d = new Date(t);
+  return isNaN(d) ? "" : d.toLocaleString(undefined,
+    { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+function stClass(c) {
+  if (!c) return "";
+  return c < 300 ? "st-2xx" : c < 400 ? "st-3xx" : c < 500 ? "st-4xx" : "st-5xx";
+}
+async function loadLogs() {
+  try {
+    const q = $("log-account").value;
+    const r = await api("/api/admin/logs?limit=200" + (q ? "&account=" + encodeURIComponent(q) : ""));
+    const rows = r.entries || [];
+    $("log-empty").classList.toggle("hidden", rows.length > 0);
+    $("log-body").innerHTML = rows.map(e => {
+      // Not an else-chain of two: tripwire bookkeeping entries carry
+      // direction "trip" and must not masquerade as B→A traffic.
+      const dir = e.direction === "a2b"
+        ? `<span class="chipA">A</span><span style="color:var(--faint)">→</span><span class="chipB">B</span>`
+        : e.direction === "b2a"
+          ? `<span class="chipB">B</span><span style="color:var(--faint)">→</span><span class="chipA">A</span>`
+          : `<span class="hint">${esc(e.direction)}</span>`;
+      return `<tr>
+        <td class="hint mono">${esc(fmtTime(e.time))}</td>
+        <td class="mono">${esc(e.account)}</td>
+        <td class="dirchip">${dir}</td>
+        <td class="mono ${stClass(e.status)}">${e.status || ""}</td>
+        <td class="mono ${stClass(e.upstream)}">${e.upstream || ""}</td>
+        <td class="mono">${e.latency_ms}</td>
+        <td class="mono hint">${e.req_bytes || 0}</td>
+        <td class="mono hint">${e.resp_bytes || 0}</td>
+        <td class="mono">${e.applied || 0}${e.warnings ? ` <span class="warnline" style="margin:0">⚠${e.warnings}</span>` : ""}</td>
+        <td class="hint" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.err || "")}">${esc(e.err || "")}</td>
+      </tr>`;
+    }).join("");
+  } catch (e) { toast(e.message, true); }
+}
+$("btn-logs").addEventListener("click", loadLogs);
+$("log-account").addEventListener("change", loadLogs);
+function stopPoll() { if (S.pollTimer) { clearInterval(S.pollTimer); S.pollTimer = null; $("log-auto").checked = false; } }
+$("log-auto").addEventListener("change", e => {
+  if (e.target.checked) { loadLogs(); S.pollTimer = setInterval(loadLogs, 5000); }
+  else stopPoll();
+});
+
+/* ---------- dashboard ---------- */
+function fmtCount(n) {
+  n = Number(n) || 0;
+  if (n < 1000) return String(n);
+  if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0) + "k";
+  return (n / 1e6).toFixed(1) + "M";
+}
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(1)) + " " + u[i];
+}
+function fmtDur(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600),
+        m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  if (d) return d + "d " + h + "h";
+  if (h) return h + "h " + m + "m";
+  if (m) return m + "m " + s + "s";
+  return s + "s";
+}
+function tile(k, v, sub, cls) {
+  return `<div class="tile"><div class="k">${esc(k)}</div>` +
+    `<div class="v${cls ? " " + cls : ""}">${esc(v)}</div>` +
+    `<div class="s">${esc(sub || "")}</div></div>`;
+}
+
+async function loadDash() {
+  let d;
+  try { d = await api("/api/admin/stats"); }
+  catch (e) { toast(e.message, true); return; }
+  const s = d.stats;
+  const refused = (s.denied || 0) + (s.blocked || 0);
+
+  $("dash-tiles").innerHTML =
+    tile("Total requests", fmtCount(s.total), (s.per_min || 0).toFixed(1) + "/min average") +
+    tile("Delivered", fmtCount(s.ok),
+         (s.total ? (s.success_pct || 0).toFixed(1) : "0.0") + "% of traffic",
+         s.total && s.success_pct < 90 ? "warn" : "good") +
+    tile("Refused", fmtCount(refused),
+         (s.denied || 0) + " unauthorised · " + (s.blocked || 0) + " locked out",
+         refused ? "bad" : "") +
+    tile("Upstream failures", fmtCount(s.server_err), (s.upstream_err || 0) + " could not be delivered",
+         s.server_err ? "bad" : "") +
+    tile("Fields translated", fmtCount(s.applied),
+         (s.warnings || 0) + " warning" + (s.warnings === 1 ? "" : "s"),
+         s.warnings ? "warn" : "") +
+    tile("Data relayed", fmtBytes((s.req_bytes || 0) + (s.resp_bytes || 0)),
+         fmtBytes(s.req_bytes) + " in · " + fmtBytes(s.resp_bytes) + " out") +
+    tile("Latency", (s.avg_ms || 0).toFixed(1) + " ms", "peak " + (s.max_ms || 0) + " ms") +
+    tile("Node uptime", fmtDur(s.uptime_sec), d.accounts + " account" + (d.accounts === 1 ? "" : "s"));
+
+  const series = s.series || [];
+  const peak = series.reduce((m, p) => Math.max(m, p.total || 0), 0);
+  $("dash-chart").innerHTML = series.map(p => {
+    const t = p.total || 0;
+    if (!t) return `<div class="col empty" title="no traffic"></div>`;
+    const h = Math.max(4, Math.round(t * 100 / peak));
+    const badPct = Math.round((p.bad || 0) * 100 / t);
+    const when = new Date(p.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return `<div class="col" style="height:${h}%" title="${esc(when)} · ${t} request${t === 1 ? "" : "s"}` +
+      `, ${p.bad || 0} refused/failed">` +
+      (badPct ? `<i class="bad" style="height:${badPct}%"></i>` : "") +
+      `<i class="ok" style="height:${100 - badPct}%"></i></div>`;
+  }).join("");
+  $("dash-note").textContent = peak ? "peak " + peak + " req/min" : "no traffic in the last hour";
+
+  const rows = s.accounts || [];
+  $("dash-empty").classList.toggle("hidden", rows.length > 0);
+  $("dash-accounts-body").innerHTML = rows.map(a => `<tr>
+      <td class="mono">${esc(a.account)}</td>
+      <td class="num mono">${fmtCount(a.total)}</td>
+      <td class="num mono st-2xx">${fmtCount(a.ok)}</td>
+      <td class="num mono ${(a.denied + a.blocked) ? "st-4xx" : ""}">${fmtCount(a.denied + a.blocked)}</td>
+      <td class="num mono ${a.failed ? "st-5xx" : ""}">${fmtCount(a.failed)}</td>
+      <td class="num mono">${(a.avg_ms || 0).toFixed(1)}</td>
+      <td class="num mono">${fmtCount(a.applied)}${a.warnings ? ` <span class="warnline" style="margin:0">⚠${a.warnings}</span>` : ""}</td>
+      <td class="num mono hint">${esc(fmtBytes((a.req_bytes || 0) + (a.resp_bytes || 0)))}</td>
+      <td class="hint">${esc(fmtTime(a.last_seen))}</td>
+    </tr>`).join("");
+}
+$("btn-dash").addEventListener("click", loadDash);
+function stopDashPoll() {
+  if (S.dashTimer) { clearInterval(S.dashTimer); S.dashTimer = null; $("dash-auto").checked = false; }
+}
+$("dash-auto").addEventListener("change", e => {
+  if (e.target.checked) { loadDash(); S.dashTimer = setInterval(loadDash, 5000); }
+  else stopDashPoll();
+});
+
+/* ---------- boot ---------- */
+async function boot() {
+  health();
+  try {
+    await loadDash();
+    await loadAccounts();
+    showView("dashboard");
+  } catch (_) { /* gate shown by api() */ }
+}
+if (S.token) boot(); else gate(true, false);
+</script>
+</body>
+</html>

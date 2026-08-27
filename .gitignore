@@ -1,0 +1,28 @@
+# Build output
+/xlate
+/xlate.exe
+*.test
+*.exe
+
+# Coverage
+cover.out
+coverage.*
+
+# Runtime state — contains credentials in plaintext, never commit
+xlate.state.json
+xlate.state.json.tmp
+*.state.json
+*.state.json.tmp
+
+# Audit trail
+xlate.audit.jsonl
+*.audit.jsonl
+
+# Release archives
+*.zip
+
+# Machine-local assistant settings
+.claude/
+
+# Live-harness scratch output
+livetest/run/

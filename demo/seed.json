@@ -1,0 +1,97 @@
+{
+  "_comment": [
+    "Dummy accounts for the xlate demo. Everything here is fictional:",
+    "the target URLs point at the local mock destination on :9090, and the",
+    "credentials are throwaway strings that exist only in this file.",
+    "Never reuse them anywhere real."
+  ],
+  "admin_token": "demo-admin-token-please-change",
+  "upstream": "http://127.0.0.1:9090",
+  "accounts": [
+    {
+      "id": "acme",
+      "name": "Acme billing ⇄ PSP",
+      "enabled": true,
+      "a": { "label": "Acme", "target_url": "http://127.0.0.1:9090/v2/payments" },
+      "b": {
+        "label": "PSP",
+        "target_url": "http://127.0.0.1:9090/v2/payments",
+        "outbound_token": "demo-psp-outbound-credential"
+      },
+      "map": [
+        { "a": "payment_id", "b": "payment_proof" },
+        { "a": "customer.id", "b": "cust_id" },
+        { "a": "amount", "b": "value" },
+        { "a": "currency", "b": "ccy" },
+        {
+          "a": "created_at",
+          "b": "created_epoch",
+          "transform": { "kind": "date", "a_format": "rfc3339", "b_format": "unix" }
+        }
+      ]
+    },
+    {
+      "id": "northwind",
+      "name": "Northwind ERP ⇄ Freightline",
+      "enabled": true,
+      "a": { "label": "Northwind" },
+      "b": { "label": "Freightline", "target_url": "http://127.0.0.1:9090/shipments" },
+      "map": [
+        { "a": "order_ref", "b": "shipment_id" },
+        { "a": "ship_to.postcode", "b": "destination_zip" },
+        {
+          "a": "dispatch_date",
+          "b": "dispatched_on",
+          "transform": { "kind": "date", "a_format": "date", "b_format": "unix_ms" }
+        }
+      ]
+    },
+    {
+      "id": "contoso",
+      "name": "Contoso Freight (onboarding)",
+      "enabled": true,
+      "a": { "label": "Contoso" },
+      "b": {
+        "label": "Our WMS",
+        "target_url": "http://127.0.0.1:9090/shipments",
+        "outbound_token": "demo-wms-internal-credential"
+      },
+      "map": []
+    },
+    {
+      "id": "legacy-crm",
+      "name": "Legacy CRM sync (paused)",
+      "enabled": false,
+      "a": { "label": "CRM" },
+      "b": { "label": "Warehouse" },
+      "map": [{ "a": "cust_no", "b": "customer_number" }]
+    }
+  ],
+  "payloads": {
+    "acme": {
+      "payment_id": "P-10041",
+      "customer": { "id": "C-7781" },
+      "amount": 2499,
+      "currency": "USD",
+      "created_at": "2024-03-01T09:00:00Z"
+    },
+    "acme_bad_date": {
+      "payment_id": "P-10042",
+      "created_at": "01/03/2024"
+    },
+    "northwind": {
+      "order_ref": "O-9001",
+      "ship_to": { "postcode": "10001" },
+      "dispatch_date": "2024-03-01"
+    },
+    "contoso": {
+      "consignmentRef": "CON-88421",
+      "customer": { "accountNo": "AC-99", "contactEmail": "ops@contoso.example", "vip": true },
+      "shipTo": { "postCode": "SW1A 1AA", "country": "GB" },
+      "grossWeightKg": 412.5,
+      "dispatchedAt": "2024-03-01T09:00:00Z",
+      "lineItems": [{ "sku": "WID-1", "qty": 3 }],
+      "notes": null
+    }
+  }
+}

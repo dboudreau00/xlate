@@ -1,0 +1,68 @@
+# systemd unit for xlate.
+#
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin xlate
+#   sudo install -m 0755 xlate /usr/local/bin/xlate
+#   sudo install -d -o xlate -g xlate -m 0700 /var/lib/xlate /var/log/xlate
+#   sudo install -m 0600 -o root -g root xlate.env /etc/xlate.env   # holds the admin token
+#   sudo systemctl enable --now xlate
+#
+# Verify the audit chain at any time:
+#   sudo -u xlate /usr/local/bin/xlate -verify-audit /var/log/xlate/trail.jsonl
+
+[Unit]
+Description=xlate REST field-translation gateway
+Documentation=https://github.com/dboudreau00/xlate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xlate
+Group=xlate
+
+# XLATE_ADMIN_TOKEN and XLATE_ALERT_SECRET belong here, not on the command
+# line, where they would be visible in `ps`.
+EnvironmentFile=/etc/xlate.env
+
+ExecStart=/usr/local/bin/xlate \
+  -listen 127.0.0.1:8080 \
+  -state /var/lib/xlate/state.json \
+  -audit /var/log/xlate/trail.jsonl \
+  -trip-mode lock
+
+# SIGTERM drains in-flight requests, writes server.stop, and closes the
+# audit trail cleanly. Give it room to finish rather than being killed
+# mid-write: the server drains for up to the largest configured account
+# timeout plus 5s, and the per-account maximum is 300s.
+KillSignal=SIGTERM
+TimeoutStopSec=310
+Restart=on-failure
+RestartSec=5s
+
+# The state file holds credentials in plaintext, so keep the blast radius
+# small.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+# The only two paths it may write.
+ReadWritePaths=/var/lib/xlate /var/log/xlate
+
+# The audit trail is fsynced per security event; do not let the journal
+# rate-limit the operational log alongside it.
+LogRateLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target
