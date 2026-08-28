@@ -1,5 +1,9 @@
 # xlate
 
+<img width="375" height="369" alt="Screenshot 2026-08-27 224839" src="https://github.com/user-attachments/assets/4a2d925c-97ed-4123-aef1-85ae68d7deb6" />
+
+
+
 Bidirectional REST field-translation gateway. Two systems that speak different field vocabularies POST to xlate; it renames (and optionally converts) fields per an account's map, forwards to the other side with that side's credentials, and reverse-maps the JSON response — each party only ever sees its own field names.
 
 ```
