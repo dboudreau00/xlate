@@ -1,6 +1,7 @@
 # Build a static binary, then ship it on a base with nothing else on it.
 # The admin console is embedded, so the final image is one file plus certs.
-FROM golang:1.26-alpine AS build
+# golang:1.26-alpine
+FROM golang@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS build
 WORKDIR /src
 
 # Nothing outside the standard library, so there is nothing to download —
@@ -10,7 +11,8 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/xlate . \
     && mkdir -p /out/data
 
-FROM gcr.io/distroless/static-debian12:nonroot
+# gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /out/xlate /usr/local/bin/xlate
 
 # State and audit trail live here; mount a volume so they survive the
