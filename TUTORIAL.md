@@ -60,7 +60,7 @@ curl -s $XL/healthz
 ```
 
 ```json
-{"ok":true,"version":"0.4.0","accounts":0,"uptime_sec":3}
+{"ok":true,"version":"0.4.1","accounts":0,"uptime_sec":3}
 ```
 
 > Without `XLATE_ADMIN_TOKEN`, xlate generates a token and prints it at startup. That is fine for a first look, but it changes on every restart — pin it once you're doing anything real.

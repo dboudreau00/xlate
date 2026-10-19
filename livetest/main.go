@@ -786,7 +786,7 @@ func run(pa, pb *partner) string {
 	sec("Observability")
 	r = admin("GET", "/stats", nil)
 	eq(r.Status, 200, "GET /api/admin/stats -> 200")
-	eq(at(r.Body, "version"), "0.4.0", "stats reports the version")
+	eq(at(r.Body, "version"), "0.4.1", "stats reports the version")
 	ok(strings.Contains(r.Raw, "acme-globex"), "stats include per-account counters")
 
 	r = admin("GET", "/logs", nil)

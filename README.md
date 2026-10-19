@@ -290,10 +290,10 @@ Two consequences worth knowing before you deploy:
 ## Deploying
 
 ```sh
-docker build -t xlate:0.4.0 .
+docker build -t xlate:0.4.1 .
 docker run -d --name xlate -p 8080:8080 \
   -e XLATE_ADMIN_TOKEN="$(openssl rand -hex 32)" \
-  -v xlate-data:/var/lib/xlate xlate:0.4.0
+  -v xlate-data:/var/lib/xlate xlate:0.4.1
 ```
 
 The image is `distroless/static` running as `nonroot`: the binary, CA certs, and nothing else — no shell, no package manager. State and the audit trail live on the mounted volume. A named volume (as above) inherits the correct ownership from the image; with a **bind mount** instead, `chown 65532:65532` the host directory first or the non-root process cannot create its files.
