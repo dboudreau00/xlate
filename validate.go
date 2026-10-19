@@ -159,6 +159,22 @@ func headerSafe(s string) bool {
 	return true
 }
 
+// checkAdminToken applies the inbound/outbound token rules to an
+// operator-pinned admin token. A generated token is always strong; the
+// override path (-admin-token, XLATE_ADMIN_TOKEN) is not, and it guards
+// every credential in the state file. The error never echoes the value.
+func checkAdminToken(tok string) error {
+	switch {
+	case len(tok) < minTokenLen:
+		return fmt.Errorf("admin token must be at least %d characters", minTokenLen)
+	case len(tok) > maxTokenLen:
+		return fmt.Errorf("admin token must be at most %d characters", maxTokenLen)
+	case !headerSafe(tok):
+		return errors.New("admin token must contain only printable non-space ASCII")
+	}
+	return nil
+}
+
 // printableText rejects control characters (including CR/LF and NUL) in
 // free-text fields that are rendered in the console and written to the
 // state file.

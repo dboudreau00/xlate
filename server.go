@@ -145,9 +145,10 @@ func (s *Server) recovered(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Printf("panic serving %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				path := safeLogValue(r.URL.Path, 200)
+				log.Printf("panic serving %s %s: %v\n%s", safeLogValue(r.Method, 16), path, rec, debug.Stack())
 				s.auditEmit("system", "server.panic", map[string]any{
-					"method": r.Method, "path": r.URL.Path, "panic": fmt.Sprint(rec),
+					"method": safeLogValue(r.Method, 16), "path": path, "panic": fmt.Sprint(rec),
 				})
 				jsonErrorCode(w, http.StatusInternalServerError, "internal", "internal error")
 			}
@@ -347,10 +348,13 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Detail goes to activity/audit logs only; the caller is the
 		// opposite party and does not need our internal topology.
+		// net/http embeds the request URL in the error, and target URLs
+		// can carry a credential in the query; redact before it is stored.
+		redacted := truncate(redactTargetErr(err, to.TargetURL), 240)
 		entry.Status = http.StatusBadGateway
-		entry.Err = truncate(err.Error(), 240)
+		entry.Err = redacted
 		s.auditEmit("account:"+id, "ingest.error", map[string]any{
-			"account": id, "dir": dirStr, "kind": classifyNetErr(err), "err": truncate(err.Error(), 240),
+			"account": id, "dir": dirStr, "kind": classifyNetErr(err), "err": redacted,
 		})
 		jsonErrorCode(w, http.StatusBadGateway, "upstream_failed", "upstream request failed")
 		return
@@ -749,8 +753,11 @@ func (s *Server) handleAdminUI(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// frame-ancestors does not fall back to default-src; without it any
+	// origin could frame the console around the admin-token prompt.
+	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'")
+		"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	_, _ = w.Write(s.adminHTML)
 }
 
@@ -787,11 +794,14 @@ func (s *Server) noteAdminDenied(r *http.Request) {
 	s.adminDeniedUntil = now.Add(10 * time.Second)
 	s.adminDeniedMu.Unlock()
 
-	detail := map[string]any{"ip": ip, "path": r.URL.Path}
+	// The path is client-controlled and %0A survives URL decoding, so it
+	// is neutralised before it reaches the process log.
+	path := safeLogValue(r.URL.Path, 200)
+	detail := map[string]any{"ip": ip, "path": path}
 	if held > 0 {
 		detail["suppressed"] = held
 	}
-	log.Printf("admin auth denied (ip %s, path %s, %d more suppressed in the last window)", ip, r.URL.Path, held)
+	log.Printf("admin auth denied (ip %s, path %s, %d more suppressed in the last window)", safeLogValue(ip, 64), path, held)
 	s.auditEmit("admin", "admin.denied", detail)
 }
 

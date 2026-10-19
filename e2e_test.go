@@ -933,7 +933,7 @@ func TestAdminUISecurityHeaders(t *testing.T) {
 		}
 	}
 	csp := hdr.Get("Content-Security-Policy")
-	for _, want := range []string{"default-src 'none'", "connect-src 'self'", "base-uri 'none'", "form-action 'none'"} {
+	for _, want := range []string{"default-src 'none'", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'"} {
 		if !strings.Contains(csp, want) {
 			t.Errorf("CSP missing %q: %s", want, csp)
 		}

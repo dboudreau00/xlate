@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/url"
@@ -260,7 +261,17 @@ func NewAlerter(url, secret string, audit *AuditLog) *Alerter {
 	if url == "" {
 		return nil
 	}
-	return &Alerter{URL: url, Secret: secret, audit: audit, client: &http.Client{Timeout: 5 * time.Second}}
+	return &Alerter{URL: url, Secret: secret, audit: audit, client: &http.Client{
+		Timeout: 5 * time.Second,
+		// Same rule as the ingest client: never follow a redirect. Go
+		// strips Authorization across origins but not X-Xlate-Signature,
+		// so following one would hand a valid signature and the alert
+		// body to whatever the Location names. post() treats the 3xx as
+		// a failure, which lands in the audit trail as alert.failed.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}}
 }
 
 // Send dispatches asynchronously with one retry. Alert delivery must
@@ -316,6 +327,18 @@ func redactErr(err error, rawURL string) string {
 		return ""
 	}
 	return strings.ReplaceAll(err.Error(), rawURL, redactURL(rawURL))
+}
+
+// redactTargetErr is redactErr for a forwarded request. net/http builds
+// the error from the request's re-serialised URL, which can differ from
+// the configured string, so that form is redacted as well.
+func redactTargetErr(err error, rawURL string) string {
+	s := redactErr(err, rawURL)
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.URL != "" {
+		s = strings.ReplaceAll(s, ue.URL, redactURL(ue.URL))
+	}
+	return s
 }
 
 func (a *Alerter) post(body []byte) error {

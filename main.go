@@ -105,6 +105,8 @@ func main() {
 	if token == "" {
 		token = newAdminToken()
 		generated = true
+	} else if err := checkAdminToken(token); err != nil {
+		log.Fatalf("%v (use e.g. `openssl rand -hex 32`)", err)
 	}
 
 	store, err := OpenStore(*statePath)
@@ -135,18 +137,7 @@ func main() {
 	srv.trip = NewTripwire(*tripThreshold, *tripWindow, *tripLock, *tripMode)
 	srv.alerter = NewAlerter(*alertWebhook, secret, audit)
 	srv.trustProxy = *trustProxy
-	hs := &http.Server{
-		Addr:              *listen,
-		Handler:           srv.routes(),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		// No WriteTimeout: the handler blocks on the upstream call,
-		// which is already bounded by the per-account timeout.
-		//
-		// Pinned rather than inherited: this carries bearer credentials,
-		// and a future change to Go's default must not quietly lower it.
-		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
-	}
+	hs := newHTTPServer(*listen, srv.routes())
 
 	scheme := "http"
 	if *tlsCert != "" && *tlsKey != "" {
@@ -205,4 +196,27 @@ func displayAddr(listen string) string {
 		return "localhost" + listen
 	}
 	return listen
+}
+
+// newHTTPServer is the listener configuration, separate from main so a
+// test can run the real timeouts against the real handler chain.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		// Bounds the whole request read. Without it a client that sends
+		// headers declaring a body and then stalls holds the connection
+		// (net/http drains the unread body before it will even write a
+		// 401), bypassing both ReadHeaderTimeout and IdleTimeout. It does
+		// not cancel a running handler, so slow upstreams are unaffected.
+		ReadTimeout: 30 * time.Second,
+		IdleTimeout: 120 * time.Second,
+		// No WriteTimeout: the handler blocks on the upstream call,
+		// which is already bounded by the per-account timeout.
+		//
+		// Pinned rather than inherited: this carries bearer credentials,
+		// and a future change to Go's default must not quietly lower it.
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
 }

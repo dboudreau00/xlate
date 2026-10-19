@@ -53,7 +53,7 @@ Every shot below is the embedded console running the demo — no external assets
 |---|---|---|
 | `-listen` | `:8080` | listen address |
 | `-state` | `xlate.state.json` | state file path |
-| `-admin-token` | *(env `XLATE_ADMIN_TOKEN`, else generated per run)* | control-plane credential |
+| `-admin-token` | *(env `XLATE_ADMIN_TOKEN`, else generated per run)* | control-plane credential; a pinned value must be 16-512 printable ASCII characters or startup fails |
 | `-log-size` | `500` | activity ring buffer entries |
 | `-max-body` | `2097152` | request/response body cap (bytes, min 1024) |
 | `-tls-cert` / `-tls-key` | | serve HTTPS directly (both or neither) |
@@ -277,8 +277,11 @@ Two consequences worth knowing before you deploy:
 - Tokens are stored **plaintext** in the state file (outbound credentials must be reversible; inbound/admin follow for simplicity). Mitigate with file perms (`0600`) and host controls; hashing inbound + admin tokens is on the roadmap.
 - Handler panics are recovered to a clean `500`; the stack goes to the server log and audit trail, never the wire. Upstream failure detail (internal topology) likewise stays in logs.
 - Client IPs come from the socket peer. `-trust-proxy` opts into the first `X-Forwarded-For` hop — only enable behind a proxy that strips client-supplied XFF, because this value feeds tripwire forensics.
+- Neither outbound client follows redirects: a 3xx from a destination is relayed to the caller, and one from the alert webhook counts as a failed delivery, so `X-Xlate-Signature` and the alert body never reach a `Location` target. Whole-request reads are bounded (`ReadTimeout` 30s) so a client that declares a body and stalls cannot hold a connection.
+- Errors from failed forwards are redacted to `scheme://host` before they reach the activity log or the audit trail, because a target URL can carry a credential in its query string.
+- The forwarding client honours `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`. For `https://` targets a proxy only sees a tunnel; for `http://` targets it sees the outbound bearer token and the body. Keep those variables unset unless you mean to route egress through a proxy you trust.
 - Unsigned alert webhooks are spoofable; the startup log warns if `-alert-webhook` is set without `-alert-secret`.
-- Admin UI ships a strict CSP; run behind TLS. Target URLs are admin-supplied and unrestricted — an SSRF primitive if untrusted parties gain admin access; egress-filter the host if that matters.
+- Admin UI ships a strict CSP that also refuses framing (`frame-ancestors 'none'`, `X-Frame-Options: DENY`); run behind TLS. Target URLs are admin-supplied and unrestricted — an SSRF primitive if untrusted parties gain admin access; egress-filter the host if that matters.
 - Credentials and correlation identifiers are validated to be header-safe before they can reach an outbound `Authorization` or pass-through header, so no admin- or partner-supplied value can smuggle CRLF into a forwarded request.
 - Unknown accounts answer `404` before the tripwire is consulted, so account IDs can be probed without being counted. IDs are handed to integrators in URLs and are not secrets; metering the probe would mean allocating tripwire state for arbitrary attacker-chosen strings, which is a worse trade. Front with a rate limiter if enumeration matters to you.
 - The fsync cost on refused requests (above) is a disk-I/O amplification vector for an unauthenticated caller. Bounded by whatever rate limiter sits in front.
