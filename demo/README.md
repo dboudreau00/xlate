@@ -33,7 +33,7 @@ Four accounts, each chosen to show a different thing:
 
 Worth a look once it's up:
 
-- **Dashboard** — lifetime totals, the per-minute chart, and the per-account rollup. Run with `-Minutes 5` for a chart with an actual shape; a one-minute run puts everything in a single bar.
+- **Dashboard**: each account as a lane through the gateway (hover one to trace it), lifetime totals, the per-minute chart, and the per-account rollup. Run with `-Minutes 5` for a chart with an actual shape; a one-minute run puts everything in a single bar.
 - **contoso → Field discovery** — the field names the partner sent, ready to wire. Click **Add pair** on a few, fill in your own side, Save. Then grep the audit trail and the activity log for any of their *values* (`CON-88421`, `ops@contoso.example`); there are none. Containers and arrays are marked *not mappable* because a field map cannot address them.
 - **Activity** — one row per request, metadata only.
 - **Theme toggle** — top right. Light is the default and the choice is remembered.

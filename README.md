@@ -33,7 +33,7 @@ XLATE_ADMIN_TOKEN=... ./xlate -state /var/lib/xlate/state.json \
   -alert-webhook https://ops.example/hooks/xlate -alert-secret "$SECRET"
 ```
 
-Open `http://localhost:8080/admin/`, sign in, create an account, add field pairs (the **fx** button on a pair adds a date transform), and hand each party its curl snippet from the Integration card. The console opens on a **Dashboard** of node counters; it ships in a light theme with a toggle in the top right, remembered per browser.
+Open `http://localhost:8080/admin/`, sign in, create an account, add field pairs (the **fx** button on a pair adds a date transform), and hand each party its curl snippet from the Integration card. The console opens on a **Dashboard**: every integration as a lane through the gateway, the per-minute chart, node vitals and a per-integration rollup. It ships in a light theme with a toggle in the top right, remembered per browser.
 
 Want it populated? `./demo/demo.ps1` (or `demo.sh`) brings up the gateway, a mock destination, four dummy accounts and traffic in one command — see [demo/README.md](demo/README.md).
 
@@ -43,9 +43,9 @@ Every shot below is the embedded console running the demo — no external assets
 
 | | |
 |---|---|
-| [![Dashboard](docs/screenshots/02-dashboard.png)](docs/screenshots/02-dashboard.png) *Dashboard — lifetime counters, per-minute chart, per-account rollup* | [![Accounts](docs/screenshots/03-accounts.png)](docs/screenshots/03-accounts.png) *Accounts — status, tripwire badges, traffic at a glance* |
-| [![Account editor](docs/screenshots/04-editor-acme.png)](docs/screenshots/04-editor-acme.png) *Account editor — endpoints, field map with a date transform, dry run, integration snippets* | [![Field discovery](docs/screenshots/05-discovery-contoso.png)](docs/screenshots/05-discovery-contoso.png) *Field discovery — a partner's vocabulary learned from live traffic, paths and types only* |
-| [![Activity](docs/screenshots/06-activity.png)](docs/screenshots/06-activity.png) *Activity — one row per request, metadata only, payloads never stored* | [![Dark theme](docs/screenshots/07-dashboard-dark.png)](docs/screenshots/07-dashboard-dark.png) *Dark theme — one toggle, remembered per browser* |
+| [![Dashboard](docs/screenshots/02-dashboard.png)](docs/screenshots/02-dashboard.png) *Dashboard: integration topology, per-minute chart, node vitals, per-integration rollup* | [![Integrations](docs/screenshots/03-accounts.png)](docs/screenshots/03-accounts.png) *Integrations: status, tripwire badges, traffic at a glance* |
+| [![Account editor](docs/screenshots/04-editor-acme.png)](docs/screenshots/04-editor-acme.png) *Account editor: endpoints, field map with a date transform, dry run, integration snippets* | [![Field discovery](docs/screenshots/05-discovery-contoso.png)](docs/screenshots/05-discovery-contoso.png) *Field discovery: a partner's vocabulary learned from live traffic, paths and types only* |
+| [![Activity](docs/screenshots/06-activity.png)](docs/screenshots/06-activity.png) *Activity: one row per request, metadata only, payloads never stored* | [![Dark theme](docs/screenshots/07-dashboard-dark.png)](docs/screenshots/07-dashboard-dark.png) *Dark theme: one toggle, remembered per browser* |
 
 ### Flags
 
