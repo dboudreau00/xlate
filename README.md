@@ -33,19 +33,105 @@ XLATE_ADMIN_TOKEN=... ./xlate -state /var/lib/xlate/state.json \
   -alert-webhook https://ops.example/hooks/xlate -alert-secret "$SECRET"
 ```
 
-Open `http://localhost:8080/admin/`, sign in, create an account, add field pairs (the **fx** button on a pair adds a date transform), and hand each party its curl snippet from the Integration card. The console opens on a **Dashboard**: every integration as a lane through the gateway, the per-minute chart, node vitals and a per-integration rollup. It ships in a light theme with a toggle in the top right, remembered per browser.
+Open `http://localhost:8080/admin/`, sign in with the admin token (see [Signing in](#signing-in)), create an account, add field pairs (the **fx** button on a pair adds a date transform), and hand each party its curl snippet from the Integration card. The console opens on a **Dashboard**: every integration as a lane through the gateway, the per-minute chart, node vitals and a per-integration rollup. It ships in a light theme with a toggle in the top right, remembered per browser.
 
 Want it populated? `./demo/demo.ps1` (or `demo.sh`) brings up the gateway, a mock destination, four dummy accounts and traffic in one command — see [demo/README.md](demo/README.md).
 
-## A look around
+## Signing in
 
-Every shot below is the embedded console running the demo — no external assets, no build step.
+The console and every `/api/admin/*` route accept one credential, the **admin token**. It is separate from the per-account partner tokens, which only work on `/t/...` and never open the console.
+
+### Where the token comes from
+
+At startup xlate uses the first of these that is set:
+
+1. the `-admin-token` flag
+2. the `XLATE_ADMIN_TOKEN` environment variable
+3. neither: xlate generates one (`xadm_` followed by 64 hex characters from `crypto/rand`) and prints it at the end of the startup log
+
+```text
+$ ./xlate -listen :8080
+2026/10/25 21:25:27 xlate 0.4.1 listening on :8080
+2026/10/25 21:25:27 admin ui: http://localhost:8080/admin/
+2026/10/25 21:25:27 state: xlate.state.json (0 accounts)
+2026/10/25 21:25:27 audit: xlate.audit.jsonl (verify anytime: xlate -verify-audit xlate.audit.jsonl)
+2026/10/25 21:25:27 tripwire: >5 refused in 5m0s -> lock
+2026/10/25 21:25:27 admin token (generated for this run — pin it with -admin-token or XLATE_ADMIN_TOKEN):
+2026/10/25 21:25:27   xadm_<64 hex characters>
+```
+
+The log goes to stderr: the terminal you started xlate in, `journalctl -u xlate` under systemd, or `docker logs xlate` in a container. A generated token is never written to disk, so it changes on every restart and signs out every open console. That is fine for a first look; for anything that restarts, set your own.
+
+### Setting your own
+
+Generate a value once and keep it wherever you keep secrets:
+
+```sh
+openssl rand -hex 32
+```
+
+```powershell
+$b = [byte[]]::new(32); [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); -join ($b | ForEach-Object { $_.ToString('x2') })
+```
+
+Then give it to xlate through the environment:
+
+| Where xlate runs | How |
+|---|---|
+| A shell | `XLATE_ADMIN_TOKEN=<token> ./xlate -listen :8080` |
+| PowerShell | `$env:XLATE_ADMIN_TOKEN = "<token>"; ./xlate.exe -listen :8080` |
+| systemd | `XLATE_ADMIN_TOKEN=<token>` in `/etc/xlate.env` (mode `0600`), copied from [`deploy/xlate.env.example`](deploy/xlate.env.example) |
+| Docker | `docker run -e XLATE_ADMIN_TOKEN=<token> ...` (see [Deploying](#deploying)) |
+
+`-admin-token <token>` works too, but a command line is visible to every local user in `ps`, while a process's environment is readable only by its owner and root. A token you set must be 16-512 printable ASCII characters with no spaces, or xlate refuses to start and says why. It is never printed. To rotate it, change the value and restart; every console signed in with the old one goes back to the sign-in screen.
+
+Over plain HTTP the token crosses the network in the clear. Anywhere but loopback, terminate TLS first (`-tls-cert`/`-tls-key` or a proxy, see [Deploying](#deploying)).
+
+### In the console
+
+Open `/admin/`, paste the token and press **Sign in** (or Enter).
 
 | | |
 |---|---|
-| [![Dashboard](docs/screenshots/02-dashboard.png)](docs/screenshots/02-dashboard.png) *Dashboard: integration topology, per-minute chart, node vitals, per-integration rollup* | [![Integrations](docs/screenshots/03-accounts.png)](docs/screenshots/03-accounts.png) *Integrations: status, tripwire badges, traffic at a glance* |
-| [![Account editor](docs/screenshots/04-editor-acme.png)](docs/screenshots/04-editor-acme.png) *Account editor: endpoints, field map with a date transform, dry run, integration snippets* | [![Field discovery](docs/screenshots/05-discovery-contoso.png)](docs/screenshots/05-discovery-contoso.png) *Field discovery: a partner's vocabulary learned from live traffic, paths and types only* |
-| [![Activity](docs/screenshots/06-activity.png)](docs/screenshots/06-activity.png) *Activity: one row per request, metadata only, payloads never stored* | [![Dark theme](docs/screenshots/07-dashboard-dark.png)](docs/screenshots/07-dashboard-dark.png) *Dark theme: one toggle, remembered per browser* |
+| [![Sign-in](docs/screenshots/01-signin.png)](docs/screenshots/01-signin.png) *Sign-in: paste the admin token* | [![Token refused](docs/screenshots/08-signin-rejected.png)](docs/screenshots/08-signin-rejected.png) *A token the server does not accept is refused, and the attempt is audited* |
+
+The console keeps the token in that browser tab's `sessionStorage`: it survives a reload, is gone when the tab closes, and a new tab asks again. It never goes into a cookie or `localStorage`. **Sign out** (the arrow at the top right) forgets it at once. If the server stops accepting it (a restart with a new generated token, or a rotation), the console drops back to the sign-in screen. Failed sign-ins are written to the audit trail, coalesced to one record per 10 seconds.
+
+### From scripts
+
+```sh
+curl -H "Authorization: Bearer $XLATE_ADMIN_TOKEN" http://localhost:8080/api/admin/accounts
+```
+
+Every admin route is listed under [Control plane](#control-plane).
+
+## A look around
+
+Every shot below is the embedded console running the demo (`./demo/demo.ps1 -Minutes 5`): no external assets, no build step.
+
+### Dashboard
+
+[![Dashboard](docs/screenshots/02-dashboard.png)](docs/screenshots/02-dashboard.png)
+*Every integration as a lane through the gateway, the per-minute chart, node vitals and the per-integration rollup*
+
+| | |
+|---|---|
+| [![Lane hover](docs/screenshots/09-topology-hover.png)](docs/screenshots/09-topology-hover.png) *Hover a lane to trace it end to end; click it to open the integration* | [![Locked lane](docs/screenshots/10-topology-locked.png)](docs/screenshots/10-topology-locked.png) *A locked-out lane: refused requests stop short of the gateway* |
+| [![Chart and vitals](docs/screenshots/11-chart-vitals.png)](docs/screenshots/11-chart-vitals.png) *Per-minute chart with hover detail, beside the node vitals* | [![Dark theme](docs/screenshots/07-dashboard-dark.png)](docs/screenshots/07-dashboard-dark.png) *Dark theme: one toggle, remembered per browser* |
+
+### Integrations
+
+| | |
+|---|---|
+| [![Integrations](docs/screenshots/03-accounts.png)](docs/screenshots/03-accounts.png) *Integrations: status, tripwire badges, field counts* | [![New account](docs/screenshots/15-new-account.png)](docs/screenshots/15-new-account.png) *New account: two endpoints, a field map, options* |
+| [![Account editor](docs/screenshots/04-editor-acme.png)](docs/screenshots/04-editor-acme.png) *Account editor: endpoints, field map with a date transform, dry run, integration snippets* | [![Field map](docs/screenshots/12-field-map.png)](docs/screenshots/12-field-map.png) *Field map: dot paths reach nested fields; **fx** converts dates in flight* |
+| [![Dry run](docs/screenshots/13-dry-run.png)](docs/screenshots/13-dry-run.png) *Dry run: the saved map applied to a sample payload, nothing forwarded* | [![Integration snippets](docs/screenshots/14-integration.png)](docs/screenshots/14-integration.png) *Integration snippets: each side's URL and curl call, token masked on screen* |
+
+### Field discovery and activity
+
+| | |
+|---|---|
+| [![Field discovery](docs/screenshots/05-discovery-contoso.png)](docs/screenshots/05-discovery-contoso.png) *Field discovery: a partner's vocabulary learned from live traffic, paths and types only* | [![Activity](docs/screenshots/06-activity.png)](docs/screenshots/06-activity.png) *Activity: one row per request, metadata only, payloads never stored* |
 
 ### Flags
 

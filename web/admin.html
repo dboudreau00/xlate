@@ -173,7 +173,7 @@
   .tp-bar{display:flex;flex-direction:column;overflow:hidden;border-radius:3px;transition:opacity .15s ease-out}
   .tp-bars.hovering .tp-col:not(.on) .tp-bar{opacity:.5}
   .tp-bad{background:var(--err)} .tp-ok{flex:1;background:var(--sideB)}
-  .tp-tip{position:absolute;top:-8px;z-index:10;transform:translate(-50%,-100%);white-space:nowrap;pointer-events:none;
+  .tp-tip{position:absolute;top:0;z-index:10;white-space:nowrap;pointer-events:none;
     border-radius:8px;background:var(--core);color:var(--core-ink);padding:6px 10px;font:11px/1.5 var(--mono)}
   .tp-axis{margin-top:8px;display:flex;justify-content:space-between;font:10px/1.5 var(--mono);color:var(--faint)}
   .tp-legend{margin-top:16px;display:flex;gap:16px;font-size:12px;line-height:16px;color:var(--dim)}
@@ -1537,12 +1537,20 @@ function applyChartHover() {
   const ago = series.length - i - 1, bad = p.bad || 0;
   tip.textContent = (ago ? ago + "m ago" : "now") + " · " + (p.ok || 0) + " delivered" +
     (bad ? " · " + bad + " refused or failed" : "");
-  // Centred over its bar, except near either end, where it would
-  // overhang the card; there it hangs inward from the bar instead.
-  const at = (i + 0.5) / series.length;
-  tip.style.left = (at * 100) + "%";
-  tip.style.transform = at > 0.85 ? "translate(-100%,-100%)" : at < 0.15 ? "translate(0,-100%)" : "";
+  // Anchored to the top of its own bar. With room above, it sits there,
+  // centred, hanging inward near either end of the card; on a bar too
+  // tall for that, it sits beside the bar inside the plot rather than
+  // over the card's header.
   tip.classList.remove("hidden");
+  const at = (i + 0.5) / series.length;
+  const peak = series.reduce((m, q) => Math.max(m, q.total || 0), 0) || 1;
+  const top = $("tp-bars").clientHeight * (1 - (p.total || 0) / peak);
+  const above = top >= tip.offsetHeight + 8;
+  const x = above ? (at > 0.85 ? "-100%" : at < 0.15 ? "0px" : "-50%")
+    : (at > 0.5 ? "calc(-100% - 10px)" : "10px");
+  tip.style.left = (at * 100) + "%";
+  tip.style.top = top + "px";
+  tip.style.transform = `translate(${x}, ${above ? "calc(-100% - 8px)" : "0px"})`;
 }
 $("tp-bars").addEventListener("mouseover", e => {
   const c = e.target.closest(".tp-col");
