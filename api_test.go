@@ -654,9 +654,13 @@ func TestAPIAdminAuthGuardsEveryControlRoute(t *testing.T) {
 		{"DELETE", "/api/admin/accounts/x"},
 		{"POST", "/api/admin/accounts/x/rotate"},
 		{"POST", "/api/admin/accounts/x/test"},
+		{"GET", "/api/admin/accounts/x/discover"},
+		{"POST", "/api/admin/accounts/x/discover"},
+		{"DELETE", "/api/admin/accounts/x/discover"},
 		{"POST", "/api/admin/accounts/x/tripwire/reset"},
 		{"GET", "/api/admin/tripwire"},
 		{"GET", "/api/admin/logs"},
+		{"GET", "/api/admin/stats"},
 	} {
 		r := call(t, ts, tc.method, tc.path, "", nil)
 		if r.status != 401 {

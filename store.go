@@ -404,6 +404,32 @@ func (s *Store) Rotate(id, side, kind string) (string, error) {
 	return tok, nil
 }
 
+// SetEnabled persists only the enabled flag of the stored account. The
+// tripwire freeze uses it instead of Update because the account it holds
+// was loaded when the request began: writing that copy back would undo any
+// rotation or edit an admin made since, and restore a token that was just
+// retired.
+func (s *Store) SetEnabled(id string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, cur := s.findLocked(id)
+	if cur == nil {
+		return fmt.Errorf("%w: %q", errAccountNotFound, id)
+	}
+	if cur.Enabled == enabled {
+		return nil
+	}
+	before := cur.clone()
+	cur.Enabled = enabled
+	cur.UpdatedAt = time.Now().UTC()
+	// In place, like Rotate: the slice snapshot would not undo it.
+	if err := s.persistLocked(); err != nil {
+		*cur = *before
+		return err
+	}
+	return nil
+}
+
 func mergeTokens(in *Endpoint, cur Endpoint) {
 	if strings.TrimSpace(in.InboundToken) == "" {
 		in.InboundToken = cur.InboundToken

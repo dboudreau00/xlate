@@ -275,7 +275,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 			"account": id, "dir": dirStr, "method": method, "ip": ip,
 		})
 		if info := s.trip.RecordDenied(id, ip); info != nil {
-			s.onTrip(acct, info)
+			s.onTrip(info)
 		}
 		return
 	}
@@ -564,7 +564,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 // onTrip runs the tripwire procedure: audit first (fsynced), then alert,
 // then the configured containment action. Ordering is deliberate — the
 // forensic record must exist before anything that can fail or block.
-func (s *Server) onTrip(acct *Account, info *TripInfo) {
+func (s *Server) onTrip(info *TripInfo) {
 	action := s.trip.Mode
 	s.auditEmit("system", "tripwire.trip", map[string]any{
 		"account": info.Account, "count": info.Count, "window_sec": int(s.trip.Window.Seconds()),
@@ -577,9 +577,9 @@ func (s *Server) onTrip(acct *Account, info *TripInfo) {
 		Err:    fmt.Sprintf("tripwire: %d refused attempts in %s (mode %s)", info.Count, s.trip.Window, action),
 	})
 	if action == "freeze" {
-		frozen := acct.clone()
-		disabled := false
-		if _, err := s.store.Update(&accountInput{Account: *frozen, Enabled: &disabled}); err != nil {
+		// Only the flag is written. The request's copy of the account
+		// predates its own fsyncs and any admin rotate or edit since.
+		if err := s.store.SetEnabled(info.Account, false); err != nil {
 			log.Printf("tripwire freeze failed for %s: %v", info.Account, err)
 			s.auditEmit("system", "tripwire.freeze_failed", map[string]any{"account": info.Account, "err": err.Error()})
 		} else {

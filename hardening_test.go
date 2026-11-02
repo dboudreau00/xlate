@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -302,5 +303,92 @@ func TestHugeNestingIsRefusedNotFatal(t *testing.T) {
 	// The server must still answer afterwards.
 	if h := call(t, ts, "GET", "/healthz", "", nil); h.status != http.StatusOK {
 		t.Errorf("server unhealthy after the deep body: %d", h.status)
+	}
+}
+
+// Review of the 0.5.0 candidate.
+
+// The tripwire holds the account as the request loaded it. In freeze mode
+// it must write only the flag: writing that copy back used to undo a
+// rotation or edit made in between, and so re-activate a retired token.
+func TestTripwireFreezeKeepsLaterAdminChanges(t *testing.T) {
+	var srv *Server
+	ts := newAPI(t, func(s *Server) {
+		srv = s
+		s.trip = NewTripwire(5, time.Minute, time.Hour, "freeze")
+	})
+	acct := mustCreate(t, ts, map[string]any{
+		"id": "frz", "name": "before", "enabled": true,
+		"map": []map[string]any{{"a": "x", "b": "y"}},
+		"b":   map[string]any{"target_url": "http://127.0.0.1:1/never"},
+	})
+	retired := sideToken(acct, "a")
+
+	// What a request that began before the admin's changes would still hold.
+	if _, ok := srv.store.Get("frz"); !ok {
+		t.Fatal("account missing")
+	}
+
+	doc := admin(t, ts, "GET", "/api/admin/accounts/frz", nil).json(t)
+	doc["name"] = "after"
+	if r := admin(t, ts, "PUT", "/api/admin/accounts/frz", doc); r.status != http.StatusOK {
+		t.Fatalf("put: %d %s", r.status, r.body)
+	}
+	rot := admin(t, ts, "POST", "/api/admin/accounts/frz/rotate", map[string]any{"side": "a", "kind": "inbound"})
+	if rot.status != http.StatusOK {
+		t.Fatalf("rotate: %d %s", rot.status, rot.body)
+	}
+	fresh := rot.json(t)["token"].(string)
+
+	now := time.Now()
+	srv.onTrip(&TripInfo{Account: "frz", Count: 6, FirstAt: now, LastAt: now})
+
+	got := admin(t, ts, "GET", "/api/admin/accounts/frz", nil).json(t)
+	if got["enabled"] != false {
+		t.Errorf("freeze should disable the account, enabled=%v", got["enabled"])
+	}
+	if got["name"] != "after" {
+		t.Errorf("freeze reverted the name to %v", got["name"])
+	}
+	if tok := sideToken(got, "a"); tok != fresh {
+		t.Errorf("freeze changed the inbound token (retired one live again: %v)", tok == retired)
+	}
+}
+
+func TestSetEnabled(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetEnabled("nope", false); !errors.Is(err, errAccountNotFound) {
+		t.Errorf("unknown account: want errAccountNotFound, got %v", err)
+	}
+	created, err := store.Create(&accountInput{Account: Account{ID: "acc"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := created.UpdatedAt
+	if err := store.SetEnabled("acc", false); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.Get("acc")
+	if got.Enabled || !got.UpdatedAt.After(before) {
+		t.Errorf("want disabled and a newer UpdatedAt, got enabled=%v updated=%v (was %v)", got.Enabled, got.UpdatedAt, before)
+	}
+	// Setting the value it already has writes nothing.
+	stamp := got.UpdatedAt
+	if err := store.SetEnabled("acc", false); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := store.Get("acc"); !again.UpdatedAt.Equal(stamp) {
+		t.Error("a no-op SetEnabled should not touch UpdatedAt")
+	}
+	// The change survives a reopen.
+	reopened, err := OpenStore(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back, _ := reopened.Get("acc"); back.Enabled {
+		t.Error("disabled flag was not persisted")
 	}
 }
