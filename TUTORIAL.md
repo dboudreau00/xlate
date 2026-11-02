@@ -21,12 +21,13 @@ Neither side changes a line of code. Neither side learns the other's vocabulary.
 4. [Stand up a fake System B](#4-stand-up-a-fake-system-b)
 5. [Send a real request](#5-send-a-real-request)
 6. [Convert a date in flight](#6-convert-a-date-in-flight)
-7. [The return leg](#7-the-return-leg)
-8. [Hand each side its credentials](#8-hand-each-side-its-credentials)
-9. [Watch the tripwire fire](#9-watch-the-tripwire-fire)
-10. [Prove the audit trail is intact](#10-prove-the-audit-trail-is-intact)
-11. [When things go wrong](#when-things-go-wrong)
-12. [Going to production](#going-to-production)
+7. [Repeated groups](#7-repeated-groups)
+8. [The return leg](#8-the-return-leg)
+9. [Hand each side its credentials](#9-hand-each-side-its-credentials)
+10. [Watch the tripwire fire](#10-watch-the-tripwire-fire)
+11. [Prove the audit trail is intact](#11-prove-the-audit-trail-is-intact)
+12. [When things go wrong](#when-things-go-wrong)
+13. [Going to production](#going-to-production)
 
 ---
 
@@ -299,11 +300,113 @@ curl -s -X PUT $XL/api/admin/accounts/acme \
 
 Rejected at save time, which is the whole point: an unvalidated typo here would be accepted and then fail open on *every request forever*, silently forwarding unconverted values. Use `rfc3339`, `unix`, `unix_ms`, `date`, `datetime`, `rfc1123`, or a real Go layout like `02/01/2006 15:04`.
 
-## 7. The return leg
+## 7. Repeated groups
+
+An invoice has lines, and a line is a group of fields repeated once per item. Put `[]` after the name of a list and the rows beneath it apply to every element of that list. Add two rows to the map from step 6 (remember that `PUT` replaces the document):
+
+```sh
+curl -s -X PUT $XL/api/admin/accounts/acme \
+  -H "Authorization: Bearer $TOK" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "Acme billing ⇄ PSP",
+    "a": {"label": "Acme"},
+    "b": {"label": "PSP",
+          "target_url": "http://127.0.0.1:9090/payments",
+          "outbound_token": "psp-secret-credential-value"},
+    "map": [
+      {"a": "payment_id",  "b": "payment_proof"},
+      {"a": "customer.id", "b": "cust_id"},
+      {"a": "amount",      "b": "value"},
+      {"a": "created_at",  "b": "created_epoch",
+       "transform": {"kind": "date", "a_format": "rfc3339", "b_format": "unix"}},
+      {"a": "lines[].sku",     "b": "items[].product_code"},
+      {"a": "lines[].shipped", "b": "items[].shipped_epoch",
+       "transform": {"kind": "date", "a_format": "rfc3339", "b_format": "unix"}}
+    ]
+  }' > /dev/null
+```
+
+Dry-run an invoice with two lines:
+
+```sh
+curl -s -X POST $XL/api/admin/accounts/acme/test \
+  -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+  -d '{
+    "direction": "a2b",
+    "payload": {
+      "payment_id": "P-778",
+      "lines": [
+        {"sku": "W-1", "qty": 2, "shipped": "2024-03-01T09:00:00Z"},
+        {"sku": "W-2", "qty": 1, "shipped": "2024-03-02T09:00:00Z"}
+      ]
+    }
+  }'
+```
+
+```json
+{
+  "applied": 5,
+  "translated": {
+    "items": [
+      {"product_code": "W-1", "qty": 2, "shipped_epoch": 1709283600},
+      {"product_code": "W-2", "qty": 1, "shipped_epoch": 1709370000}
+    ],
+    "payment_proof": "P-778"
+  },
+  "warnings": []
+}
+```
+
+What that shows:
+
+- `lines` became `items`. The list moves as a whole, so its name changes even though no row names `lines` on its own.
+- `sku` was renamed and `shipped` was converted **in every element**. `qty` has no row, so it stayed in its element untouched, exactly as an unmapped field stays in an object.
+- `applied` counts each mapped field in each element: one for `payment_id`, and two for each of the two lines.
+
+The same rows run the other way on `b2a` and on the response:
+
+```sh
+curl -s -X POST $XL/api/admin/accounts/acme/test \
+  -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+  -d '{"direction":"b2a","payload":{"items":[{"product_code":"W-1","qty":2,"shipped_epoch":1709283600}]}}'
+```
+
+```json
+{
+  "applied": 2,
+  "translated": {"lines": [{"qty": 2, "shipped": "2024-03-01T09:00:00Z", "sku": "W-1"}]},
+  "warnings": []
+}
+```
+
+**What the gateway will not guess at.** A list the map addresses must hold objects. Anything else is refused, because there is no field in it to rename and passing it on would show the PSP Acme's own field names:
+
+```sh
+curl -s -X POST $XL/api/admin/accounts/acme/test \
+  -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+  -d '{"direction":"a2b","payload":{"lines":[{"sku":"W-1"},"stray"]}}'
+```
+
+```json
+{
+  "applied": 0,
+  "refused": [{"field": "lines[1]", "message": "must be an object, got string"}],
+  "rejected": true,
+  "translated": {"lines": [{"sku": "W-1"}, "stray"]},
+  "warnings": []
+}
+```
+
+The dry run hands the payload back as it came. A real request gets `422` with code `array_invalid` and the same `fields`, and nothing is forwarded. Lists are limited to 1 000 elements; `[]` and `null` are fine.
+
+Rows that cannot work are refused when you save them, the way the bad date layout was in step 6: a positional index such as `lines[0].sku`, a second `[]` in one path, or `[]` on only one side of a row. The README's [Arrays](README.md#arrays) section has the rest: what `drop_unmapped` does inside elements, and what is not supported.
+
+## 8. The return leg
 
 For async flows the PSP calls *you*. It POSTs to `/t/acme/b2a` with **side B's** inbound token, and the same pipeline runs mirrored: B's vocabulary in, A's vocabulary out to A's `target_url`. Set `a.target_url` the same way you set `b.target_url`, hand the PSP side B's inbound token, and you have a full duplex integration.
 
-## 8. Hand each side its credentials
+## 9. Hand each side its credentials
 
 Each party needs exactly two things: its URL and its inbound token.
 
@@ -326,7 +429,7 @@ curl -s -X POST $XL/api/admin/accounts/acme/rotate \
 
 The old token stops working immediately. The audit trail records *which slot* rotated, never the value.
 
-## 9. Watch the tripwire fire
+## 10. Watch the tripwire fire
 
 Send six bad tokens (the default threshold is 5, and it fires when *exceeded*):
 
@@ -371,7 +474,7 @@ curl -s -X POST $XL/api/admin/accounts/acme/tripwire/reset -H "Authorization: Be
 
 In production set `-alert-webhook` and `-alert-secret` so a trip pages you, signed with HMAC-SHA256 so the receiver can tell a real alert from a forged one.
 
-## 10. Prove the audit trail is intact
+## 11. Prove the audit trail is intact
 
 ```sh
 ./xlate -verify-audit /tmp/xlate-demo/trail.jsonl
@@ -419,6 +522,7 @@ Every error is `{"error": "...", "code": "..."}`. Branch on `code`, not on prose
 | `502 upstream_failed` | the destination didn't answer | check the destination; detail is in xlate's log, never in the response |
 | `400 bad_json` | body wasn't exactly one JSON object | no arrays, no trailing bytes |
 | `400 validation_failed` | admin document was rejected | read the `fields` array — it names each bad field |
+| `422 array_invalid` | a list the map addresses is too long, is not a list, or holds something that is not an object | the `fields` array names the path (`lines[1]`); fix the data, nothing was forwarded |
 | `409 already_exists` | that account id is taken | pick another, or `PUT` the existing one |
 
 **"My config change did nothing."** It almost certainly returned `400` with an unknown-field error. xlate rejects fields it does not recognise rather than ignoring them, because a silently dropped `target_url` typo is a data-loss bug wearing a `200 OK`:

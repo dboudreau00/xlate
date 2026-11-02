@@ -49,6 +49,58 @@ func BenchmarkTranslate(b *testing.B) {
 	}
 }
 
+// benchArray builds n elements of 24 mapped fields each, fresh per call
+// because Translate edits its input.
+func benchArray(n int) map[string]any {
+	elems := make([]any, n)
+	for i := range elems {
+		e := make(map[string]any, 25)
+		for f := 0; f < 24; f++ {
+			e[fmt.Sprintf("fld%02d", f)] = "value"
+		}
+		elems[i] = e
+	}
+	return map[string]any{"lines": elems}
+}
+
+func benchArrayPairs(fields int) []FieldPair {
+	ps := make([]FieldPair, fields)
+	for f := range ps {
+		ps[f] = FieldPair{A: fmt.Sprintf("lines[].fld%02d", f), B: fmt.Sprintf("items[].col%02d", f)}
+	}
+	return ps
+}
+
+// An ordinary array: 100 elements of 24 fields.
+func BenchmarkTranslateArray(b *testing.B) {
+	pairs := benchArrayPairs(24)
+	src := make([]map[string]any, b.N)
+	for i := range src {
+		src[i] = benchArray(100)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		Translate(src[i], pairs, AtoB, TranslateOptions{})
+	}
+}
+
+// The cheapest hostile message: a full 500-row map over a maximum-length
+// array of empty elements, which is about 3 KB on the wire.
+func BenchmarkTranslateArrayWorstCase(b *testing.B) {
+	pairs := benchArrayPairs(maxMapPairs)
+	empty := make([]any, maxArrayLen)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		elems := make([]any, len(empty))
+		for j := range elems {
+			elems[j] = map[string]any{}
+		}
+		Translate(map[string]any{"lines": elems}, pairs, AtoB, TranslateOptions{})
+	}
+}
+
 func BenchmarkDecodeObjectStrict(b *testing.B) {
 	body := []byte(benchPayload)
 	b.ReportAllocs()

@@ -176,9 +176,10 @@ Errors are a stable envelope: `{"error": "<human>", "code": "<machine>"}`.
 | `405` | `method_not_allowed` | that side may not use this method; the `Allow` header lists the ones it may ([Methods](#methods)) |
 | `413` | `payload_too_large` | body exceeds `-max-body` |
 | `422` | `transform_failed` | [strict transforms](#strict-transforms), or any GET or DELETE query: a value could not be converted, nothing was forwarded |
+| `422` | `array_invalid` | an [array](#arrays) the map addresses is too long, is not an array, or holds something that is not an object; nothing was forwarded |
 | `429` | `account_locked` | tripwire lockout; `Retry-After` says when to return |
 | `429` | `rate_limited` | that side's [rate limit](#rate-limits) is spent; `Retry-After` says when to return |
-| `502` | `no_target` / `upstream_failed` / `upstream_read` / `upstream_oversize` / `bad_target` / `upstream_invalid` | destination problems (detail in logs only); `upstream_invalid` is a response refused by strict transforms |
+| `502` | `no_target` / `upstream_failed` / `upstream_read` / `upstream_oversize` / `bad_target` / `upstream_invalid` | destination problems (detail in logs only); `upstream_invalid` is a response refused by strict transforms or by the [array](#arrays) rules |
 | `500` | `internal` | encode failure or recovered panic |
 
 Every route answers with this envelope, including unknown paths and wrong methods.
@@ -230,13 +231,32 @@ A `PUT` that omits `rate_limit_per_min` keeps the stored value; send `0` to remo
 ## Mapping semantics
 
 - A pair `{"a": "payment_id", "b": "payment_proof"}` is one bidirectional vocabulary entry; direction picks the source column.
-- Names are dot-paths: `customer.id` reaches nested objects; intermediates on the destination path are created. Array indexing and keys containing literal dots are out of scope — a path containing `[` or `]` is rejected rather than quietly treated as a literal key.
-- A path may not be a parent of another path on the same side: `customer` and `customer.id` together are ambiguous (extracting one shadows the other, and which wins depends on row order), so the pair is refused at config time.
+- Names are dot-paths: `customer.id` reaches nested objects; intermediates on the destination path are created. A `[]` after a name addresses every element of an array (see [Arrays](#arrays)). Keys containing literal dots are out of scope, and so is every other use of brackets: a path containing `[` or `]` that is not the `[]` described there is rejected rather than quietly treated as a literal key.
+- A path may not be a parent of another path on the same side: `customer` and `customer.id` together are ambiguous (extracting one shadows the other, and which wins depends on row order), so the pair is refused at config time. The same rule covers arrays: see [Arrays](#arrays).
 - Application is two-phase (extract all sources, then assign all destinations), so swapped pairs within one map cannot clobber each other.
 - Extracting the last key of a nested object leaves the empty parent in place — silently pruning containers is more surprising than an empty object.
 - Missing source: no-op. Destination collision: overwritten, surfaced as a warning. Unmapped fields pass through unless **drop unmapped** is set (requests only; responses are never drop-filtered).
 - Destination unreachable (an intermediate segment of the destination path exists in the payload but is not an object): the value stays at its **source** path untranslated, surfaced as a warning. On any per-field failure the original data still flows; nothing is ever dropped.
 - Numbers survive verbatim (`json.Number`) — 64-bit IDs don't lose precision.
+
+### Arrays
+
+A `[]` after a name addresses every element of the array there, so repeated groups can be renamed element by element:
+
+```json
+{"a": "lines[].sku", "b": "items[].product_code"}
+```
+
+`{"lines":[{"sku":"s1","qty":2}]}` crosses a2b as `{"items":[{"product_code":"s1","qty":2}]}`. b2a and the return leg run the same row backwards, and a date transform on the row converts the value in every element.
+
+- **The array moves as a unit.** It goes from its name on one side to its name on the other (`lines` becomes `items` although no row names `lines` on its own), and each element is translated by the rows under it as an object of its own. Dot paths work on both sides of the brackets: `order.lines[].tax.rate` to `invoice.rows[].vat`.
+- **What stays.** An element's unmapped fields stay in it. With **drop unmapped**, only the mapped fields of each element survive, and an element left with none becomes `{}`, so no element is ever removed and positions never change; an array no row addresses is dropped like any unmapped field. Without it, an array no row addresses crosses whole and untouched, inner names included. Moving the last field out of a nested object inside an element leaves the empty object behind, as it does anywhere else.
+- **Empty, ragged, null.** `[]` and `null` cross under the new name. Elements need not share keys: a mapped field an element lacks is a no-op for that element. A missing array is a no-op.
+- **Syntax, checked when the account is saved.** One `[]` per path, directly after a field name, with a field path after it (`lines[].sku`, `order.lines[].tax.rate`). Refused: positional indexes (`lines[0]`), `lines[]` with nothing after it (to rename the whole array use its plain name, `lines`), a second `[]` in a path (arrays inside arrays), `[]` on one side of a row only, and one array paired with two different arrays in different rows (an element's fields would be split between two arrays, and the return leg could not put them back together). The parent rule above covers arrays too: `lines` with `lines[].sku`, `lines.sku` with `lines[].sku` (one name used as an object and as an array) and `lines[].a` with `lines[].a.b` are all refused.
+- **Checked on every message.** An array a row addresses is checked before anything is changed. If it holds more than 1,000 elements, is not an array (`null` is accepted), or has an element that is not an object, the message is refused: nothing is forwarded, strict transforms or not, because passing it on would show the other side the sender's field names. The length belongs to the payload, which is why this is the one array limit checked per message instead of when the account is saved. The sender gets `422` with code `array_invalid` and the paths of *its own* fields in the usual `fields` shape (`lines`, `lines[2]`), each with a reason and never a value. Arrays no row addresses are not checked. On the return leg the caller gets `502` with code `upstream_invalid` and none of the destination's response, with the same caveat as for [strict transforms](#strict-transforms): the destination has already acted. The trail records `ingest.rejected` with `reason` `array` or `response_array` and field names only, and the dry run reports `"rejected": true` with a `refused` list. A refused message is a data problem and does not feed the tripwire.
+- **Counting.** `X-Xlate-Applied` counts each mapped field in each element; the array itself is not counted. Strict transforms report the element in the path (`lines[2].shipped`). A message keeps at most 1,500 warnings and 1,500 failed paths however long its arrays are; the warning count in the header stays exact, and the dry run says how many it left out (`warnings_omitted`).
+- **Not supported:** arrays of scalars (`tags[]`), arrays inside arrays, positional indexes, and moving a field between an element and the top level. An array inside an element that no row addresses crosses whole. A query string (GET and DELETE) carries only strings, so a query parameter named like an addressed array is refused like any value that is not an array of objects.
+- **Rolling back.** An xlate older than this change reads `lines[].sku` as a literal key, so a state file that holds array rows quietly stops translating arrays under it. Remove the rows before going back.
 
 ### Date transforms
 
@@ -314,8 +334,8 @@ $ curl -sX POST localhost:8080/api/admin/accounts -H "Authorization: Bearer $TOK
 | `timeout_sec` | 1–300; `0`/omitted takes the default of 15. Out of range is refused, not clamped |
 | `strict_transforms` | boolean, off by default; omitted on `PUT` keeps the stored value |
 | `rate_limit_per_min` | integer 0–1 000 000; `0`/omitted means no limit; omitted on `PUT` keeps the stored value |
-| `map` | ≤ 500 pairs; both sides required per row; no duplicate or parent/child paths per side |
-| `map[].{a,b}` | ≤ 256 chars, ≤ 16 segments, no empty segment, no leading/trailing dot, no array indexing |
+| `map` | ≤ 500 pairs; both sides required per row; no duplicate or parent/child paths per side; array rows pair one array with one array (see [Arrays](#arrays)) |
+| `map[].{a,b}` | ≤ 256 chars, ≤ 16 segments, no empty segment, no leading/trailing dot; the only bracket form is one `[]` per path, as in `lines[].sku`, with `[]` on both sides of a row or neither |
 | `map[].transform` | `kind` must be `date`; both formats must be a known name, an epoch, or a round-tripping Go layout |
 
 ## Field discovery
@@ -332,11 +352,14 @@ curl localhost:8080/api/admin/accounts/contoso/discover -H "Authorization: Beare
 ```json
 {"path": "customer.accountNo", "types": ["string"], "count": 1, "mappable": true}
 {"path": "lineItems",          "types": ["array"],  "count": 1, "mappable": false}
+{"path": "lineItems[].sku",    "types": ["string"], "count": 1, "mappable": true}
 ```
 
 The response also carries `suggest`, a set of starter mapping rows built from the mappable paths. Shapes appear on the activity log entry too.
 
-In the console, the account editor has a **Field discovery** card: start or stop the window, see every observed path with its type and how often it arrived, and click **Add pair** to drop one straight into the field map with the other side left blank to fill in. Paths a map cannot address — containers, arrays, collapsed identifier maps — are listed but marked *not mappable*.
+In the console, the account editor has a **Field discovery** card: start or stop the window, see every observed path with its type and how often it arrived, and click **Add pair** to drop one straight into the field map with the other side left blank to fill in. Paths a map cannot address (containers, collapsed identifier maps, and arrays themselves) are listed but marked *not mappable*.
+
+Arrays are walked, because a map can address their elements: the fields of an array's object elements are listed as `lineItems[].sku` and are mappable, so the starter rows already have the form a map takes. Up to 1,000 elements of an array are read and their shapes merged, and a path seen in many elements counts once per message, so *Seen* still means messages. An element that is not an object is listed as `lineItems[]` with its type, which is how a mixed array shows during onboarding, and an array inside an element is listed but not walked, since a map addresses one level of array.
 
 It records **paths and types, never values**. That distinction is the whole design: field names are schema, field values are the payment identifiers and PII this gateway exists to pass through without reading. *Bodies are never captured* stays true. Three further guards, because the input is partner-controlled:
 
@@ -410,6 +433,8 @@ Translation itself is not the cost. The engine is roughly a microsecond:
 | Operation | Cost |
 |---|---|
 | `Translate` (5 pairs, nested, one date fx) | 1.1 µs |
+| `Translate`, one [array](#arrays) of 100 elements with 24 fields each | 0.4 ms |
+| `Translate`, 500 rows over a 1 000-element array of empty objects (the cheapest hostile message, about 3 KB) | 4 ms |
 | JSON decode of a typical payload | 3.8 µs |
 | Token comparison (constant-time) | 0.25 µs |
 | Tripwire gate / record | 14 ns / 80 ns |
@@ -438,7 +463,8 @@ Two consequences worth knowing before you deploy:
 - Credentials and correlation identifiers are validated to be header-safe before they can reach an outbound `Authorization` or pass-through header, so no admin- or partner-supplied value can smuggle CRLF into a forwarded request.
 - Unknown accounts answer `404` before the tripwire is consulted, so account IDs can be probed without being counted. IDs are handed to integrators in URLs and are not secrets; metering the probe would mean allocating tripwire state for arbitrary attacker-chosen strings, which is a worse trade. Front with a rate limiter if enumeration matters to you.
 - The fsync cost on refused requests (above) is a disk-I/O amplification vector for an unauthenticated caller. Bounded by whatever rate limiter sits in front.
-- Field discovery walks partner-controlled JSON. Depth, path count, key length and sibling count are all bounded; keys are stripped of control characters before they can reach a log line or the console; nothing is written to the trail or the state file. It is off by default and expires on its own. See *Field discovery* above for the one residual case (a small identifier-keyed object below the sibling threshold).
+- Array addressing iterates partner-controlled arrays. An addressed array may hold at most 1 000 elements and every element must be an object, or the message is refused before anything is changed or forwarded; the notes a message keeps are capped, so a hostile array cannot grow memory by the element. See *Arrays*.
+- Field discovery walks partner-controlled JSON. Depth, path count, key length, sibling count and the number of array elements read are all bounded; keys are stripped of control characters before they can reach a log line or the console; nothing is written to the trail or the state file. It is off by default and expires on its own. See *Field discovery* above for the one residual case (a small identifier-keyed object below the sibling threshold).
 
 ## Deploying
 
@@ -471,7 +497,7 @@ A corrupt or truncated state file stops the process at startup rather than quiet
 
 ## Deliberately out of scope for 0.3
 
-Enum/type value transforms, array path addressing, forwarding the caller's URL path, HEAD and OPTIONS, retries/DLQ for failed forwards, HMAC signing of *data-plane* requests, multi-user admin (OIDC), SQLite backend, off-host audit shipping.
+Enum/type value transforms, arrays of scalars and arrays inside arrays, forwarding the caller's URL path, HEAD and OPTIONS, retries/DLQ for failed forwards, HMAC signing of *data-plane* requests, multi-user admin (OIDC), SQLite backend, off-host audit shipping.
 
 ## Layout
 
@@ -494,8 +520,8 @@ make build
 
 Five suites, all in `package main`:
 
-- **Unit** (`translate_test.go`, `feature_test.go`, `query_test.go`) — the pure engine, transforms, audit chain, tripwire.
-- **Validation** (`validate_test.go`, `api_test.go`, `methods_test.go`) — every field rule, and the whole REST surface driven in-process through `httptest`.
+- **Unit** (`translate_test.go`, `feature_test.go`, `query_test.go`, `array_test.go`) — the pure engine, array addressing, transforms, audit chain, tripwire.
+- **Validation** (`validate_test.go`, `api_test.go`, `methods_test.go`, `array_api_test.go`) — every field rule, and the whole REST surface driven in-process through `httptest`.
 - **Regression** (`regression_test.go`, `reject_audit_test.go`, `coverage_gap_test.go`) — one test per defect found in review, plus the paths the others missed, so none of it can come back quietly.
 - **Adversarial** (`adversarial_test.go`) — the data plane is reachable by a partner, not an operator, and field discovery walks whatever JSON they send. These treat that input as hostile: 5000-deep nesting, unbounded distinct keys across requests, control bytes and markup smuggled through JSON key escapes, auth on every route added late, delete-during-discovery, and the body cap after the `no_target` reordering.
 - **End-to-end** (`e2e_test.go`, `methods_e2e_test.go`, build tag `e2e`) — builds the binary, runs it as a real subprocess against a mock upstream, and checks the behaviour this README documents: the error table, audit tamper-evidence, signed alerts, tripwire lockout and re-arm, redirect relaying, and that no payload or credential reaches a log.

@@ -594,7 +594,7 @@
     </div>
     <div class="row" style="margin-bottom:18px">
       <button class="btn small" id="btn-addpair">Add field pair</button>
-      <span class="hint">Dot paths reach nested fields, e.g. <code class="inline">customer.id</code>. <strong>fx</strong> adds a date transform — the value converts in flight, both directions.</span>
+      <span class="hint">Dot paths reach nested fields, e.g. <code class="inline">customer.id</code>; <code class="inline">[]</code> reaches every element of a list, e.g. <code class="inline">lines[].sku</code> on both sides. <strong>fx</strong> adds a date transform — the value converts in flight, both directions.</span>
     </div>
 
     <p class="eyebrow">Options</p>
@@ -1266,11 +1266,14 @@ $("btn-test").addEventListener("click", async () => {
   try {
     const r = await api(`/api/admin/accounts/${encodeURIComponent(S.E.id)}/test`,
       { method: "POST", body: JSON.stringify({ direction: $("test-dir").value, payload }) });
-    let html = r.rejected
-      ? `<div class="errline">Strict mode would refuse this request: ${esc((r.failed || []).join(", "))} could not be converted.</div>`
-      : `<div class="okline">${r.applied} field${r.applied === 1 ? "" : "s"} translated</div>`;
+    let html = r.refused && r.refused.length
+      ? `<div class="errline">An array cannot be translated as mapped, so this request would be refused and nothing forwarded: ${esc(r.refused.map(f => `${f.field} ${f.message}`).join("; "))}.</div>`
+      : r.rejected
+        ? `<div class="errline">Strict mode would refuse this request: ${esc((r.failed || []).join(", "))} could not be converted.</div>`
+        : `<div class="okline">${r.applied} field${r.applied === 1 ? "" : "s"} translated</div>`;
     html += `<pre class="out">${esc(JSON.stringify(r.translated, null, 2))}</pre>`;
     for (const w of r.warnings) html += `<div class="warnline">⚠ ${esc(w)}</div>`;
+    if (r.warnings_omitted) html += `<div class="warnline">⚠ and ${r.warnings_omitted} more</div>`;
     $("test-out").innerHTML = html;
   } catch (e) { $("test-out").innerHTML = `<div class="errline">${esc(e.message)}</div>`; }
 });

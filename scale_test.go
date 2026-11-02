@@ -20,20 +20,30 @@ import (
 // Wide maps, several accounts, both directions, all at once.
 //
 // Every message carries ~100 mapped fields spread over four nested groups
-// (24 fields each) and is unique, so a value that lands in the wrong field,
-// the wrong request or the wrong account cannot go unnoticed. The upstream
-// echoes what it received, which makes the return leg an identity check:
-// translate, forward, reverse-map must give the caller back its own message.
+// (24 fields each), and two arrays of repeated groups (24 fields and a date
+// in every element, of ragged length), and is unique, so a value that lands
+// in the wrong field, the wrong element, the wrong request or the wrong
+// account cannot go unnoticed. The upstream echoes what it received, which
+// makes the return leg an identity check: translate, forward, reverse-map
+// must give the caller back its own message.
 
 const (
 	scaleGroups = 4
 	scaleFields = 24 // plain pairs per group
+
+	scaleArrays      = 2
+	scaleArrayFields = 24 // plain pairs per array element, and a date besides
 )
 
 var (
 	scaleAGroups = [scaleGroups]string{"customer", "billing", "shipping", "order"}
 	scaleBGroups = [scaleGroups]string{"party", "invoice", "delivery", "purchase"}
 	scaleMap     = scalePairs()
+
+	// Side B renames each array, and nests the fields of the second one's
+	// elements, so renaming and reshaping inside elements both run.
+	scaleAArrays = [scaleArrays]string{"lines", "shipments"}
+	scaleBArrays = [scaleArrays]string{"rows", "parcels"}
 )
 
 type scalePair struct {
@@ -61,14 +71,36 @@ func scalePairs() []scalePair {
 		scalePair{a: "order.shipped", b: "purchase.shipped_epoch", date: true})
 }
 
+// scaleElemPairs are the rows under array g, with paths relative to one
+// element: the last field is a date.
+func scaleElemPairs(g int) []scalePair {
+	nest := ""
+	if g == scaleArrays-1 {
+		nest = "box."
+	}
+	var ps []scalePair
+	for f := 0; f < scaleArrayFields; f++ {
+		ps = append(ps, scalePair{a: fmt.Sprintf("fld%02d", f), b: nest + fmt.Sprintf("col%02d", f)})
+	}
+	return append(ps, scalePair{a: "placed", b: nest + "placed_epoch", date: true})
+}
+
 func scaleMapDoc() []map[string]any {
 	rows := make([]map[string]any, 0, len(scaleMap))
-	for _, p := range scaleMap {
-		row := map[string]any{"a": p.a, "b": p.b}
-		if p.date {
+	add := func(a, b string, date bool) {
+		row := map[string]any{"a": a, "b": b}
+		if date {
 			row["transform"] = map[string]any{"kind": "date", "a_format": "rfc3339", "b_format": "unix"}
 		}
 		rows = append(rows, row)
+	}
+	for _, p := range scaleMap {
+		add(p.a, p.b, p.date)
+	}
+	for g := 0; g < scaleArrays; g++ {
+		for _, p := range scaleElemPairs(g) {
+			add(scaleAArrays[g]+"[]."+p.a, scaleBArrays[g]+"[]."+p.b, p.date)
+		}
 	}
 	return rows
 }
@@ -88,10 +120,18 @@ func scaleNest(m map[string]any, path string, v any) {
 	m[parts[len(parts)-1]] = v
 }
 
-type scaleMsg struct{ a, b map[string]any } // one message, in each vocabulary
+// scaleMsg is one message in each vocabulary. aBack is side A's message as
+// the engine builds it from side B's: moving the last field out of a nested
+// object leaves the empty object behind, inside array elements too, so the
+// elements of the second array gain an empty "box". applied counts the mapped
+// fields in one leg.
+type scaleMsg struct {
+	a, b, aBack map[string]any
+	applied     int
+}
 
 func scaleMessage(tag string, n int) scaleMsg {
-	m := scaleMsg{a: map[string]any{}, b: map[string]any{}}
+	m := scaleMsg{a: map[string]any{}, b: map[string]any{}, aBack: map[string]any{}, applied: len(scaleMap)}
 	for i, p := range scaleMap {
 		var av, bv any
 		switch {
@@ -109,10 +149,59 @@ func scaleMessage(tag string, n int) scaleMsg {
 		}
 		scaleNest(m.a, p.a, av)
 		scaleNest(m.b, p.b, bv)
+		scaleNest(m.aBack, p.a, av)
 	}
-	// Unmapped fields cross untouched in either direction, and an array is
-	// carried whole: its elements are not addressable.
-	for _, side := range []map[string]any{m.a, m.b} {
+	// Arrays of repeated groups. The length varies from message to message,
+	// including none and null (what a service that serialises a nil list
+	// sends), and every element carries 24 mapped fields, a date, and a field
+	// no row addresses.
+	for g := 0; g < scaleArrays; g++ {
+		count, null := (n+g)%5, (n+3*g)%11 == 5
+		if null {
+			count = 0
+		}
+		ea, eb, eh := []any{}, []any{}, []any{}
+		for k := 0; k < count; k++ {
+			a, b := map[string]any{}, map[string]any{}
+			for i, p := range scaleElemPairs(g) {
+				var av, bv any
+				switch {
+				case p.date:
+					ts := 1786017600 + int64(n)*10 + int64(g)*1000 + int64(k)
+					av = time.Unix(ts, 0).UTC().Format(time.RFC3339)
+					bv = json.Number(strconv.FormatInt(ts, 10))
+				case i%9 == 0:
+					// Past 2^53 inside an element: must cross verbatim, as a number.
+					av = json.Number(strconv.FormatInt(
+						9007199254740993+int64(n)*100000+int64(g)*10000+int64(k)*100+int64(i), 10))
+					bv = av
+				default:
+					av = fmt.Sprintf("%s/%s.%d.%d", tag, scaleAArrays[g], k, i)
+					bv = av
+				}
+				scaleNest(a, p.a, av)
+				scaleNest(b, p.b, bv)
+			}
+			a["memo"], b["memo"] = "memo "+tag+"/"+strconv.Itoa(k), "memo "+tag+"/"+strconv.Itoa(k)
+			back := map[string]any{}
+			for key, v := range a {
+				back[key] = v
+			}
+			if g == scaleArrays-1 {
+				back["box"] = map[string]any{}
+			}
+			ea, eb, eh = append(ea, a), append(eb, b), append(eh, back)
+			m.applied += scaleArrayFields + 1
+		}
+		if null {
+			m.a[scaleAArrays[g]], m.b[scaleBArrays[g]], m.aBack[scaleAArrays[g]] = nil, nil, nil
+			continue
+		}
+		m.a[scaleAArrays[g]], m.b[scaleBArrays[g]], m.aBack[scaleAArrays[g]] = ea, eb, eh
+	}
+	// Unmapped fields cross untouched in either direction, and so does an
+	// array no row addresses: its elements keep the sender's names.
+	for _, side := range []map[string]any{m.a, m.b, m.aBack} {
 		side["note"] = "free text " + tag
 		side["items"] = []any{
 			map[string]any{"sku": "s-" + tag, "qty": json.Number("2")},
@@ -158,7 +247,7 @@ func scaleDiff(want, got map[string]string) []string {
 		if g, ok := got[k]; !ok {
 			d = append(d, "missing "+k)
 		} else if g != w {
-			d = append(d, fmt.Sprintf("%s: got %s, want %s", k, g, w))
+			d = append(d, fmt.Sprintf("%s: got %.160s, want %.160s", k, g, w))
 		}
 	}
 	for k := range got {
@@ -320,13 +409,14 @@ func TestScaleWideMapsManyAccountsBothDirections(t *testing.T) {
 			fail("%s: status %d err %v: %.120s", r.id, r.status, r.err, r.body)
 			continue
 		}
-		// What the sender wrote, what the destination must have received,
-		// where it must have gone and under whose credential.
-		sent, wantDest := r.msg.a, r.msg.b
+		// What the destination must have received, what the sender must get
+		// back, where the request must have gone and under whose credential.
+		// Side A's message built from side B's is r.msg.aBack, not r.msg.a.
+		wantDest, wantBack := r.msg.b, r.msg.aBack
 		destPath, destAuth := "/"+r.acct+"/b", "Bearer "+scaleOut("B", r.acct)
 		destResidue, respResidue := residueA, residueB
 		if r.dir == "b2a" {
-			sent, wantDest = r.msg.b, r.msg.a
+			wantDest, wantBack = r.msg.aBack, r.msg.b
 			destPath, destAuth = "/"+r.acct+"/a", "Bearer "+scaleOut("A", r.acct)
 			destResidue, respResidue = residueB, residueA
 		}
@@ -339,8 +429,8 @@ func TestScaleWideMapsManyAccountsBothDirections(t *testing.T) {
 			fail("%s: reached %s with %q, want %s with %q", r.id, hit.path, hit.auth, destPath, destAuth)
 		}
 		check(r.id+" at the destination", hit.body, wantDest, destResidue)
-		check(r.id+" back at the caller", r.body, sent, respResidue)
-		if got, want := r.hdr.Get("X-Xlate-Applied"), strconv.Itoa(2*len(scaleMap)); got != want {
+		check(r.id+" back at the caller", r.body, wantBack, respResidue)
+		if got, want := r.hdr.Get("X-Xlate-Applied"), strconv.Itoa(2*r.msg.applied); got != want {
 			fail("%s: X-Xlate-Applied %s, want %s", r.id, got, want)
 		}
 		if w := r.hdr.Get("X-Xlate-Warnings"); w != "" {

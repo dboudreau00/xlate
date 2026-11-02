@@ -53,8 +53,10 @@ type FieldObservation struct {
 	Types    []string  `json:"types"`
 	Count    int       `json:"count"`
 	LastSeen time.Time `json:"last_seen"`
-	// Mappable is false for paths a field map cannot address: array
-	// elements, and the contents of identifier-keyed objects.
+	// Mappable is false for paths a field map cannot address: containers,
+	// arrays themselves and anything that is not an object inside one, arrays
+	// inside arrays, and the contents of identifier-keyed objects. A field of
+	// an array's elements is mappable, as "lines[].sku".
 	Mappable bool `json:"mappable"`
 }
 
@@ -102,19 +104,34 @@ func (s *SchemaStore) Observe(account string, dir Direction, payload map[string]
 	// per path would mean up to maxDiscoveredPaths acquisitions per
 	// request on the data path, contending with every other account's
 	// observations — the same shape of bug the tripwire had.
+	//
+	// A path repeats within one payload when it lies inside an array, once
+	// per element. It is recorded once, with every type it showed, so a count
+	// stays the number of payloads it appeared in and a long array cannot use
+	// up the path budget on copies of itself.
 	type observed struct {
-		path, typ string
-		mappable  bool
+		path     string
+		types    []string
+		mappable bool
 	}
 	found := make([]observed, 0, 16)
+	at := make(map[string]int, 16)
 	seen := make([]string, 0, 16)
 	truncated := false
-	walkShape("", payload, 0, func(path, typ string, mappable bool) {
+	walkShape("", payload, 0, false, func(path, typ string, mappable bool) {
+		if i, dup := at[path]; dup {
+			if !containsString(found[i].types, typ) {
+				found[i].types = append(found[i].types, typ)
+				seen = append(seen, path+":"+typ)
+			}
+			return
+		}
 		if len(found) >= maxDiscoveredPaths {
 			truncated = true
 			return
 		}
-		found = append(found, observed{path, typ, mappable})
+		at[path] = len(found)
+		found = append(found, observed{path, []string{typ}, mappable})
 		seen = append(seen, path+":"+typ)
 	})
 
@@ -134,9 +151,11 @@ func (s *SchemaStore) Observe(account string, dir Direction, payload map[string]
 		}
 		obs.Count++
 		obs.LastSeen = now
-		if !containsString(obs.Types, o.typ) {
-			obs.Types = append(obs.Types, o.typ)
-			sort.Strings(obs.Types)
+		for _, typ := range o.types {
+			if !containsString(obs.Types, typ) {
+				obs.Types = append(obs.Types, typ)
+				sort.Strings(obs.Types)
+			}
 		}
 	}
 	ds.requests++
@@ -197,7 +216,13 @@ func (s *SchemaStore) Forget(account string) {
 // walkShape emits (path, jsonType, mappable) for every addressable
 // position in a decoded payload. Values are read only to determine their
 // type; none is retained.
-func walkShape(prefix string, v any, depth int, emit func(path, typ string, mappable bool)) {
+//
+// The elements of an array are walked the way a map addresses them: the
+// fields of its object elements as "lines[].sku", at most maxArrayLen of
+// them, and any other element as "lines[]" with its type, which is how a
+// mixed array shows. Only one level can be addressed, so an array inside an
+// element (inElem) is reported and not walked.
+func walkShape(prefix string, v any, depth int, inElem bool, emit func(path, typ string, mappable bool)) {
 	switch t := v.(type) {
 	case map[string]any:
 		if depth >= maxDiscoverDepth {
@@ -216,18 +241,35 @@ func walkShape(prefix string, v any, depth int, emit func(path, typ string, mapp
 		sort.Strings(keys)
 		for _, k := range keys {
 			child := joinPath(prefix, safeKey(k))
+			// A key that itself holds brackets would read as an array path
+			// below it, and a map cannot address it: nothing under it is mappable.
+			emitChild := emit
+			if strings.ContainsAny(k, "[]") {
+				emitChild = func(path, typ string, _ bool) { emit(path, typ, false) }
+			}
 			switch t[k].(type) {
 			case map[string]any:
-				emit(child, "object", false)
-				walkShape(child, t[k], depth+1, emit)
+				emitChild(child, "object", false)
+				walkShape(child, t[k], depth+1, inElem, emitChild)
 			default:
-				walkShape(child, t[k], depth+1, emit)
+				walkShape(child, t[k], depth+1, inElem, emitChild)
 			}
 		}
 	case []any:
-		// Array indexing is out of scope for field maps, so the elements
-		// are not walked; the operator only needs to know it is an array.
 		emit(prefix, "array", false)
+		if inElem {
+			return
+		}
+		for i, el := range t {
+			if i == maxArrayLen {
+				break
+			}
+			if _, isObj := el.(map[string]any); isObj {
+				walkShape(prefix+"[]", el, depth+1, true, emit)
+			} else {
+				emit(prefix+"[]", jsonType(el), false)
+			}
+		}
 	case string:
 		emit(prefix, "string", true)
 	case bool:

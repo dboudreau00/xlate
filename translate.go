@@ -1,8 +1,22 @@
 package main
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
+)
+
+// What a partner-controlled array may cost. Unlike the path rules in
+// validate.go, an array's length belongs to the payload, so it cannot be
+// checked when the account is saved: it is checked on every message, and a
+// message over the limit is refused, never truncated or passed on.
+const (
+	maxArrayLen = 1000
+	// maxNotes bounds the warnings and failed paths one Translate keeps. A row
+	// outside an array yields at most three, so no ordinary map reaches it;
+	// without it a hostile array would yield a few per element. Counts stay
+	// exact.
+	maxNotes = 3 * maxMapPairs
 )
 
 // Direction selects which column of a FieldPair is the source.
@@ -40,7 +54,8 @@ func ParseDirection(s string) (Direction, bool) {
 
 // FieldPair is one bidirectional vocabulary entry: field name on side A,
 // field name on side B. Names are dot-paths ("customer.id"); plain names
-// address top-level keys. Array indexing is out of scope for v0.1.
+// address top-level keys. A [] after a name addresses every element of the
+// array there ("lines[].sku"); see Translate.
 type FieldPair struct {
 	A string `json:"a"`
 	B string `json:"b"`
@@ -59,13 +74,141 @@ type TranslateOptions struct {
 }
 
 type TranslateResult struct {
-	Out      map[string]any
-	Applied  int
+	Out     map[string]any
+	Applied int
+	// Warnings holds the first maxNotes warnings; Warned counts all of them.
 	Warnings []string
+	Warned   int
 	// Failed lists the source paths whose transform failed under Strict.
 	// When it is not empty Out must be refused, not forwarded: it carries
 	// the unconverted values the caller asked to be kept out.
 	Failed []string
+	// Refused names the arrays a row addresses that cannot be translated as
+	// mapped: too long, not an array, or holding something that is not an
+	// object. Like Failed it means Out must be refused, not forwarded; unlike
+	// Failed it holds whatever the mode, and Out is then the payload untouched.
+	Refused []FieldError
+}
+
+func (r *TranslateResult) warn(msg string) {
+	r.Warned++
+	if len(r.Warnings) < maxNotes {
+		r.Warnings = append(r.Warnings, msg)
+	}
+}
+
+func (r *TranslateResult) fail(path string) {
+	if len(r.Failed) < maxNotes {
+		r.Failed = append(r.Failed, path)
+	}
+}
+
+func (r *TranslateResult) refuse(path, why string) {
+	if len(r.Refused) < maxNotes {
+		r.Refused = append(r.Refused, FieldError{Field: path, Message: why})
+	}
+}
+
+// absorb folds in the result of translating one array element, naming the
+// element in everything it reports.
+func (r *TranslateResult) absorb(elem string, er TranslateResult) {
+	r.Applied += er.Applied
+	r.Warned += er.Warned
+	for _, w := range er.Warnings {
+		if len(r.Warnings) >= maxNotes {
+			break
+		}
+		r.Warnings = append(r.Warnings, elem+": "+w)
+	}
+	for _, f := range er.Failed {
+		r.fail(elem + "." + f)
+	}
+}
+
+// arrayHit is every row under one array, and the array itself once read.
+type arrayHit struct {
+	src, dst string      // where the array is in the payload, and where it goes
+	rows     []FieldPair // the rows under it, relative to one element; A and B as in the map
+	val      any
+	found    bool
+}
+
+// mentionsArray is the cheap test that keeps rows without brackets, which is
+// nearly every row, out of the array code altogether.
+func mentionsArray(a, b string) bool {
+	return strings.IndexByte(a, '[') >= 0 && strings.IndexByte(b, '[') >= 0
+}
+
+// isArrayRow reports whether p addresses an array on both sides.
+func isArrayRow(p FieldPair) bool {
+	_, _, aok := splitArrayPath(p.A)
+	_, _, bok := splitArrayPath(p.B)
+	return aok && bok
+}
+
+// addArrayRow files p under its array. It reports false for a row that does
+// not address an array on both sides, which the caller then treats as an
+// ordinary row.
+func addArrayRow(arrays *[]*arrayHit, p FieldPair, dir Direction) bool {
+	aArr, aIn, aok := splitArrayPath(p.A)
+	bArr, bIn, bok := splitArrayPath(p.B)
+	if !aok || !bok {
+		return false
+	}
+	src, dst := aArr, bArr
+	if dir == BtoA {
+		src, dst = bArr, aArr
+	}
+	var ah *arrayHit
+	for _, c := range *arrays {
+		if c.src == src && c.dst == dst {
+			ah = c
+			break
+		}
+	}
+	if ah == nil {
+		ah = &arrayHit{src: src, dst: dst}
+		*arrays = append(*arrays, ah)
+	}
+	ah.rows = append(ah.rows, FieldPair{A: aIn, B: bIn, Transform: p.Transform})
+	return true
+}
+
+// checkArray records why the value at an addressed array cannot be translated.
+func (r *TranslateResult) checkArray(path string, v any) {
+	switch t := v.(type) {
+	case nil:
+		// null is how a nil list is usually sent; it crosses as null.
+	case []any:
+		if len(t) > maxArrayLen {
+			r.refuse(path, fmt.Sprintf("has %d elements; at most %d are accepted", len(t), maxArrayLen))
+			return
+		}
+		for i, el := range t {
+			if _, ok := el.(map[string]any); !ok {
+				r.refuse(path+"["+strconv.Itoa(i)+"]", "must be an object, got "+jsonType(el))
+			}
+		}
+	default:
+		r.refuse(path, "must be an array or null, got "+jsonType(v))
+	}
+}
+
+// jsonType names the JSON type of a decoded value, never the value.
+func jsonType(v any) string {
+	switch v.(type) {
+	case map[string]any:
+		return "object"
+	case []any:
+		return "array"
+	case string:
+		return "string"
+	case bool:
+		return "bool"
+	case nil:
+		return "null"
+	}
+	return "number"
 }
 
 // Translate renames fields in payload according to pairs and direction.
@@ -83,7 +226,25 @@ type TranslateResult struct {
 //   - intermediate objects on the destination path are created as needed
 //   - transform fails: the value passes untransformed with a warning; under
 //     Strict its source path is also recorded in Failed
+//   - a [] in a path addresses every element of an array: the rows under
+//     "lines[]" ("lines[].sku") are grouped by their array. The array moves
+//     from one side's name to the other's as a unit, and each element is
+//     translated by the rows under it as an object of its own, with the same
+//     options, so an element's unmapped fields stay in it (or go, under
+//     DropUnmapped, leaving {} so no element is ever removed). null crosses as
+//     null and a missing array is a no-op. An array of more than maxArrayLen
+//     elements, a value that is not an array, and an element that is not an
+//     object cannot be translated as mapped: Refused names them, nothing is
+//     changed, and Out is the payload as it came.
 func Translate(payload map[string]any, pairs []FieldPair, dir Direction, opt TranslateOptions) TranslateResult {
+	return translate(payload, pairs, dir, opt, true)
+}
+
+// translate is Translate. Rows are searched for arrays only when addressable
+// is set: the rows under an array have had their [] taken off already, and an
+// element is not searched again, which keeps a long array of small elements
+// down to the rows that apply to them.
+func translate(payload map[string]any, pairs []FieldPair, dir Direction, opt TranslateOptions, addressable bool) TranslateResult {
 	res := TranslateResult{}
 
 	type hit struct {
@@ -92,7 +253,34 @@ func Translate(payload map[string]any, pairs []FieldPair, dir Direction, opt Tra
 		val any
 		tr  *Transform
 	}
-	hits := make([]hit, 0, len(pairs))
+	// An element rarely holds every field the map knows; do not size for them all.
+	size := len(pairs)
+	if !addressable && size > len(payload) {
+		size = len(payload)
+	}
+	hits := make([]hit, 0, size)
+
+	// Arrays are read and checked before anything is changed, so a refusal
+	// leaves the payload as the sender wrote it. A row with a bracket on both
+	// sides addresses an array; one that does not parse as such is an
+	// ordinary row, as it was before arrays existed.
+	var arrays []*arrayHit
+	if addressable {
+		for _, p := range pairs {
+			if mentionsArray(p.A, p.B) {
+				addArrayRow(&arrays, p, dir)
+			}
+		}
+		for _, ah := range arrays {
+			if ah.val, ah.found = getPath(payload, ah.src); ah.found {
+				res.checkArray(ah.src, ah.val)
+			}
+		}
+		if len(res.Refused) > 0 {
+			res.Out = payload
+			return res
+		}
+	}
 
 	// Phase 1: extract.
 	for _, p := range pairs {
@@ -103,9 +291,17 @@ func Translate(payload map[string]any, pairs []FieldPair, dir Direction, opt Tra
 		if src == "" || dst == "" {
 			continue
 		}
+		if addressable && mentionsArray(src, dst) && isArrayRow(p) {
+			continue
+		}
 		if v, ok := getPath(payload, src); ok {
 			delPath(payload, src)
 			hits = append(hits, hit{src: src, dst: dst, val: v, tr: p.Transform})
+		}
+	}
+	for _, ah := range arrays {
+		if ah.found {
+			delPath(payload, ah.src)
 		}
 	}
 
@@ -124,9 +320,9 @@ func Translate(payload map[string]any, pairs []FieldPair, dir Direction, opt Tra
 				// the whole request over one bad date is the worse default
 				// for a pass-through gateway, so strict mode is opt-in per
 				// account: the caller refuses whatever carries a Failed path.
-				res.Warnings = append(res.Warnings, "transform "+strconv.Quote(h.dst)+": "+err.Error())
+				res.warn("transform " + strconv.Quote(h.dst) + ": " + err.Error())
 				if opt.Strict {
-					res.Failed = append(res.Failed, h.src)
+					res.fail(h.src)
 				}
 			} else {
 				h.val = v
@@ -134,7 +330,7 @@ func Translate(payload map[string]any, pairs []FieldPair, dir Direction, opt Tra
 		}
 		ok, warn := setPath(out, h.dst, h.val)
 		if warn != "" {
-			res.Warnings = append(res.Warnings, warn)
+			res.warn(warn)
 		}
 		if ok {
 			res.Applied++
@@ -151,7 +347,36 @@ func Translate(payload map[string]any, pairs []FieldPair, dir Direction, opt Tra
 				// full source path as a flat key so it survives the trip.
 				out[h.src] = h.val
 			}
-			res.Warnings = append(res.Warnings, "value for "+strconv.Quote(h.dst)+" left at source "+strconv.Quote(h.src))
+			res.warn("value for " + strconv.Quote(h.dst) + " left at source " + strconv.Quote(h.src))
+		}
+	}
+
+	// Arrays move like any other value; what differs is that the elements are
+	// translated once the array has somewhere to go. A blocked destination
+	// restores the array untouched, so nothing is half translated.
+	for _, ah := range arrays {
+		if !ah.found {
+			continue
+		}
+		ok, warn := setPath(out, ah.dst, ah.val)
+		if warn != "" {
+			res.warn(warn)
+		}
+		if !ok {
+			if rok, _ := setPath(out, ah.src, ah.val); !rok {
+				out[ah.src] = ah.val
+			}
+			res.warn("value for " + strconv.Quote(ah.dst) + " left at source " + strconv.Quote(ah.src))
+			continue
+		}
+		elems, _ := ah.val.([]any)
+		for i, el := range elems {
+			// checkArray vouched for every element being an object.
+			if em, isObj := el.(map[string]any); isObj {
+				er := translate(em, ah.rows, dir, opt, false)
+				elems[i] = er.Out
+				res.absorb(ah.src+"["+strconv.Itoa(i)+"]", er)
+			}
 		}
 	}
 
@@ -159,8 +384,27 @@ func Translate(payload map[string]any, pairs []FieldPair, dir Direction, opt Tra
 	return res
 }
 
+// splitArrayPath splits "order.lines[].sku" at its [] into the path of the
+// array ("order.lines") and the path inside each of its elements ("sku").
+// validateDotPath is the strict judge of what an array path may look like;
+// this reads only what a validated path holds, and reports false for anything
+// that is not of that shape.
+func splitArrayPath(p string) (array, inner string, ok bool) {
+	i := strings.Index(p, "[]")
+	if i <= 0 || len(p) < i+4 || p[i+2] != '.' {
+		return "", "", false
+	}
+	return p[:i], p[i+3:], true
+}
+
 // getPath resolves a dot-path against nested map[string]any values.
 func getPath(m map[string]any, path string) (any, bool) {
+	// A single name is by far the commonest path and needs no splitting. It
+	// matters most for a field missing from every element of a long array.
+	if strings.IndexByte(path, '.') < 0 {
+		v, ok := m[path]
+		return v, ok
+	}
 	parts := strings.Split(path, ".")
 	cur := m
 	for i, p := range parts {

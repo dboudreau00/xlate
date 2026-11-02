@@ -124,25 +124,75 @@ func TestTutorialTranscript(t *testing.T) {
        "transform":{"kind":"date","a_format":"YYYY-MM-DD","b_format":"unix"}}]}`)
 	t.Logf("\n[§6] bad layout -> %d\n%s", r.status, pretty(r.body))
 
-	// -- §8 rotate -----------------------------------------------------
+	// -- §7 repeated groups --------------------------------------------
+	r = admin(t, ts, "PUT", "/api/admin/accounts/acme", `{
+    "name": "Acme billing PSP",
+    "a": {"label": "Acme"},
+    "b": {"label": "PSP", "target_url": "`+psp.URL+`/payments",
+          "outbound_token": "psp-secret-credential-value"},
+    "map": [
+      {"a": "payment_id",  "b": "payment_proof"},
+      {"a": "customer.id", "b": "cust_id"},
+      {"a": "amount",      "b": "value"},
+      {"a": "created_at",  "b": "created_epoch",
+       "transform": {"kind": "date", "a_format": "rfc3339", "b_format": "unix"}},
+      {"a": "lines[].sku",     "b": "items[].product_code"},
+      {"a": "lines[].shipped", "b": "items[].shipped_epoch",
+       "transform": {"kind": "date", "a_format": "rfc3339", "b_format": "unix"}}
+    ]
+  }`)
+	if r.status != 200 {
+		t.Fatalf("[§7] PUT with array rows failed: %d %s", r.status, r.body)
+	}
+
+	// The documented outputs are asserted, so this section cannot drift.
+	same := func(label string, got apiResp, want string) {
+		t.Helper()
+		t.Logf("\n[§7] %s -> %d\n%s", label, got.status, pretty(got.body))
+		if canon(t, got.json(t)) != canon(t, mustObj(t, want)) {
+			t.Errorf("[§7] %s: TUTORIAL.md documents %s", label, want)
+		}
+	}
+	same("a2b dry run", admin(t, ts, "POST", "/api/admin/accounts/acme/test", `{
+    "direction": "a2b",
+    "payload": {
+      "payment_id": "P-778",
+      "lines": [
+        {"sku": "W-1", "qty": 2, "shipped": "2024-03-01T09:00:00Z"},
+        {"sku": "W-2", "qty": 1, "shipped": "2024-03-02T09:00:00Z"}
+      ]
+    }
+  }`), `{"applied":5,"translated":{"payment_proof":"P-778","items":[
+      {"product_code":"W-1","qty":2,"shipped_epoch":1709283600},
+      {"product_code":"W-2","qty":1,"shipped_epoch":1709370000}]},"warnings":[]}`)
+	same("b2a dry run", admin(t, ts, "POST", "/api/admin/accounts/acme/test", `{
+    "direction": "b2a",
+    "payload": {"items": [{"product_code": "W-1", "qty": 2, "shipped_epoch": 1709283600}]}
+  }`), `{"applied":2,"translated":{"lines":[{"sku":"W-1","qty":2,"shipped":"2024-03-01T09:00:00Z"}]},"warnings":[]}`)
+	same("refused dry run", admin(t, ts, "POST", "/api/admin/accounts/acme/test", `{
+    "direction": "a2b",
+    "payload": {"lines": [{"sku": "W-1"}, "stray"]}
+  }`), `{"applied":0,"rejected":true,"refused":[{"field":"lines[1]","message":"must be an object, got string"}],
+      "translated":{"lines":[{"sku":"W-1"},"stray"]},"warnings":[]}`)
+	// -- §9 rotate -----------------------------------------------------
 	r = admin(t, ts, "POST", "/api/admin/accounts/acme/rotate", `{"side":"a","kind":"inbound"}`)
-	t.Logf("\n[§8] rotate -> %d %s", r.status, strings.TrimSpace(string(r.body)))
+	t.Logf("\n[§9] rotate -> %d %s", r.status, strings.TrimSpace(string(r.body)))
 	atok = sideToken(admin(t, ts, "GET", "/api/admin/accounts/acme", nil).json(t), "a")
 
-	// -- §9 tripwire ---------------------------------------------------
+	// -- §10 tripwire --------------------------------------------------
 	codes := []string{}
 	for i := 0; i < 6; i++ {
 		bad := call(t, ts, "POST", "/t/acme/a2b", "wrong", `{}`)
 		codes = append(codes, itoa(bad.status))
 	}
-	t.Logf("\n[§9] six bad tokens -> %s", strings.Join(codes, " "))
+	t.Logf("\n[§10] six bad tokens -> %s", strings.Join(codes, " "))
 
 	r = call(t, ts, "POST", "/t/acme/a2b", atok, `{"payment_id":"P-1"}`)
-	t.Logf("[§9] valid token after trip -> %d  Retry-After: %q\n  %s",
+	t.Logf("[§10] valid token after trip -> %d  Retry-After: %q\n  %s",
 		r.status, r.hdr.Get("Retry-After"), strings.TrimSpace(string(r.body)))
 
 	r = admin(t, ts, "GET", "/api/admin/tripwire", nil)
-	t.Logf("[§9] tripwire status -> %s", strings.TrimSpace(string(r.body)))
+	t.Logf("[§10] tripwire status -> %s", strings.TrimSpace(string(r.body)))
 
 	// -- unknown field -------------------------------------------------
 	r = admin(t, ts, "POST", "/api/admin/accounts", `{"id":"x","target_uri":"http://x/"}`)

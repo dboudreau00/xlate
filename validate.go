@@ -216,29 +216,138 @@ func validateDotPath(p string) error {
 	if n := strings.Count(p, ".") + 1; n > maxPathDepth {
 		return fmt.Errorf("must be at most %d segments deep", maxPathDepth)
 	}
-	// Array indexing is out of scope; "items[0]" would silently address a
-	// literal key named "items[0]" instead, so refuse it explicitly.
 	if strings.ContainsAny(p, "[]") {
-		return errors.New("array indexing is not supported")
+		return checkArrayPath(p)
 	}
 	return nil
 }
 
-// prefixConflict reports a path in set that is a strict dot-prefix of p
-// (or vice versa). "customer" and "customer.id" on the same side cannot
-// both be honoured: extracting one removes or shadows the other, and
-// which wins depends on map order. Refuse the ambiguity.
+// checkArrayPath judges the one use of brackets a path may make: a single []
+// directly after a field name, with a field path after it ("lines[].sku").
+// Anything else is refused rather than guessed at: "items[0]" would silently
+// address a literal key named "items[0]", and an array inside an array, or a
+// [] with nothing after it, is more than the engine addresses.
+func checkArrayPath(p string) error {
+	i := strings.Index(p, "[]")
+	if i < 0 {
+		return errors.New("only [] is supported inside a path, to address every element of an array " +
+			"(for example lines[].sku); positional indexes such as [0] are not")
+	}
+	before, after := p[:i], p[i+2:]
+	switch {
+	case strings.Contains(after, "[]"):
+		return errors.New("only one [] per path is supported; arrays inside arrays cannot be addressed")
+	case strings.ContainsAny(before, "[]") || strings.ContainsAny(after, "[]"):
+		return errors.New("[ and ] are only allowed as the pair [] directly after a field name")
+	case before == "" || strings.HasSuffix(before, "."):
+		return errors.New("[] must directly follow a field name (for example lines[].sku)")
+	case after == "":
+		return errors.New("must name a field inside the array elements (for example lines[].sku), " +
+			"not end in []; to rename the whole array use its plain name")
+	case after[0] != '.':
+		return errors.New("[] must be followed by a dot and a field name (for example lines[].sku)")
+	}
+	return nil
+}
+
+// prefixConflict reports a path in set that cannot be honoured alongside p
+// (see pathsConflict). "customer" and "customer.id" on the same side cannot
+// both be honoured: extracting one removes or shadows the other, and which
+// wins depends on map order. Refuse the ambiguity. When p clashes with
+// several rows the lowest is named, so the answer does not depend on map
+// order either.
 func prefixConflict(set map[string]int, p string) (string, int, bool) {
+	best, bestRow, found := "", 0, false
 	for cand, row := range set {
-		short, long := cand, p
-		if len(short) > len(long) {
-			short, long = long, short
-		}
-		if short != long && strings.HasPrefix(long, short+".") {
-			return cand, row, true
+		if pathsConflict(cand, p) && (!found || row < bestRow) {
+			best, bestRow, found = cand, row, true
 		}
 	}
-	return "", 0, false
+	return best, bestRow, found
+}
+
+// pathsConflict reports whether two paths on one side cannot both be
+// honoured: one is a dot-prefix of the other, or one uses as a plain field,
+// or as an object, an array that the other addresses with [].
+func pathsConflict(x, y string) bool {
+	return isParentPath(x, y) || isParentPath(y, x) || underArray(x, y) || underArray(y, x)
+}
+
+func isParentPath(short, long string) bool {
+	return strings.HasPrefix(long, short+".")
+}
+
+// underArray reports whether y is, or lies below, the array that x addresses
+// without going through its []: "lines" and "lines.sku" against "lines[].sku".
+func underArray(x, y string) bool {
+	i := strings.Index(x, "[]")
+	if i < 0 {
+		return false
+	}
+	arr := x[:i]
+	return y == arr || strings.HasPrefix(y, arr+".")
+}
+
+// conflictWhy words the clash pathsConflict found between x and y.
+func conflictWhy(x, y string) string {
+	if isParentPath(x, y) || isParentPath(y, x) {
+		return "one path is a parent of the other"
+	}
+	for _, p := range [2][2]string{{x, y}, {y, x}} {
+		if underArray(p[0], p[1]) {
+			return fmt.Sprintf("one path addresses %q as an array and the other uses it as a plain field or object",
+				p[0][:strings.Index(p[0], "[]")])
+		}
+	}
+	return "the paths overlap"
+}
+
+// arrayPairing records which array on the other side each array has been
+// paired with, so that a later row cannot pair it with a different one: an
+// element's fields would then be split between two arrays, and the return leg
+// could not tell how to put them back together.
+type arrayPairing struct {
+	aToB, bToA map[string]pairedArray
+}
+
+type pairedArray struct {
+	array string
+	row   int
+}
+
+func newArrayPairing() *arrayPairing {
+	return &arrayPairing{aToB: map[string]pairedArray{}, bToA: map[string]pairedArray{}}
+}
+
+// add checks row i, whose two paths have each passed validateDotPath. A row
+// addresses array elements on both sides or on neither, and its arrays pair
+// one to one across the whole map.
+func (ap *arrayPairing) add(i int, p FieldPair, ve *ValidationErrors) {
+	aArr, _, aok := splitArrayPath(p.A)
+	bArr, _, bok := splitArrayPath(p.B)
+	row := fmt.Sprintf("map[%d]", i)
+	switch {
+	case !aok && !bok:
+		return
+	case !bok:
+		ve.add(row+".b", "side a addresses array elements with [] and side b does not; both sides of a row must, or neither")
+		return
+	case !aok:
+		ve.add(row+".a", "side b addresses array elements with [] and side a does not; both sides of a row must, or neither")
+		return
+	}
+	if prev, ok := ap.aToB[aArr]; ok && prev.array != bArr {
+		ve.add(row+".b", "array %q on side a is already paired with array %q on side b by map[%d]", aArr, prev.array, prev.row)
+		return
+	}
+	if prev, ok := ap.bToA[bArr]; ok && prev.array != aArr {
+		ve.add(row+".a", "array %q on side b is already paired with array %q on side a by map[%d]", bArr, prev.array, prev.row)
+		return
+	}
+	if _, ok := ap.aToB[aArr]; !ok {
+		ap.aToB[aArr] = pairedArray{bArr, i}
+		ap.bToA[bArr] = pairedArray{aArr, i}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -449,8 +558,10 @@ func validateAccountDoc(a *Account) ValidationErrors {
 	}
 
 	seen := map[string]map[string]int{"a": {}, "b": {}}
+	arrays := newArrayPairing()
 	for i, p := range a.Map {
 		row := fmt.Sprintf("map[%d]", i)
+		before := len(ve)
 		for _, s := range []struct {
 			side, val string
 		}{{"a", p.A}, {"b", p.B}} {
@@ -468,11 +579,15 @@ func validateAccountDoc(a *Account) ValidationErrors {
 				continue
 			}
 			if other, orow, clash := prefixConflict(seen[s.side], s.val); clash {
-				ve.add(field, "conflicts with %q on side %s (map[%d]): one path is a parent of the other",
-					other, s.side, orow)
+				ve.add(field, "conflicts with %q on side %s (map[%d]): %s",
+					other, s.side, orow, conflictWhy(other, s.val))
 				continue
 			}
 			seen[s.side][s.val] = i
+		}
+		// A row whose paths are not both sound has said enough already.
+		if len(ve) == before {
+			arrays.add(i, p, &ve)
 		}
 		validateTransform(p.Transform, row+".transform", &ve)
 	}

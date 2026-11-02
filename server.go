@@ -374,7 +374,26 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	// returns or a DELETE removes, so a query is always strict.
 	tres := Translate(payload, acct.Map, dir, TranslateOptions{DropUnmapped: acct.DropUnmapped, Strict: acct.StrictTransforms || query})
 	entry.Applied = tres.Applied
-	entry.Warnings = len(tres.Warnings)
+	entry.Warnings = tres.Warned
+	if len(tres.Refused) > 0 {
+		// An array the map addresses cannot be translated as mapped: too long,
+		// not an array, or holding something that is not an object. Strict or
+		// not, nothing is forwarded, because passing it on would show the
+		// destination the sender's own field names. The sender is told which
+		// of its own paths and why, never a value.
+		refused := boundedRefusals(tres.Refused)
+		entry.Status = http.StatusUnprocessableEntity
+		entry.Err = "array refused"
+		s.auditEmit("account:"+id, "ingest.rejected", map[string]any{
+			"account": id, "dir": dirStr, "method": method, "ip": ip, "reason": "array", "fields": refusalPaths(refused),
+		})
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":  "one or more arrays could not be translated as mapped",
+			"code":   "array_invalid",
+			"fields": refused,
+		})
+		return
+	}
 	if len(tres.Failed) > 0 {
 		// Strict mode: nothing is forwarded. The sender is told which of its
 		// own fields could not be converted. Never the destination's names
@@ -480,17 +499,22 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(ct, "json") && len(respBody) > 0 {
 		if rm, err := decodeObjectStrict(respBody); err == nil {
 			rr := Translate(rm, acct.Map, dir.Reverse(), TranslateOptions{Strict: acct.StrictTransforms})
-			if len(rr.Failed) > 0 {
+			if len(rr.Failed) > 0 || len(rr.Refused) > 0 {
 				// The destination has already acted on the request, so this
 				// cannot undo it. It keeps a value in the wrong
-				// representation from reaching the caller, who is told the
-				// response was unusable, in no vocabulary but its own.
+				// representation, or an array in the destination's own field
+				// names, from reaching the caller, who is told the response
+				// was unusable, in no vocabulary but its own.
+				reason, fields, why := "response_transform", boundedPaths(rr.Failed), "strict: response transform refused"
+				if len(rr.Refused) > 0 {
+					reason, fields, why = "response_array", refusalPaths(boundedRefusals(rr.Refused)), "array: response refused"
+				}
 				entry.Status = http.StatusBadGateway
-				entry.Err = "strict: response transform refused"
-				entry.Warnings += len(rr.Warnings)
+				entry.Err = why
+				entry.Warnings += rr.Warned
 				s.auditEmit("account:"+id, "ingest.rejected", map[string]any{
-					"account": id, "dir": dirStr, "method": method, "ip": ip, "reason": "response_transform",
-					"upstream": resp.StatusCode, "fields": boundedPaths(rr.Failed),
+					"account": id, "dir": dirStr, "method": method, "ip": ip, "reason": reason,
+					"upstream": resp.StatusCode, "fields": fields,
 				})
 				jsonErrorCode(w, http.StatusBadGateway, "upstream_invalid", "upstream response could not be converted")
 				return
@@ -501,7 +525,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 				// Return-leg warnings count too. Dropping them made a
 				// permanently broken response format invisible: the value
 				// failed open on every request and nothing said so.
-				entry.Warnings += len(rr.Warnings)
+				entry.Warnings += rr.Warned
 			}
 		}
 	}
@@ -834,11 +858,20 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 		"applied":    res.Applied,
 		"warnings":   warnings,
 	}
-	// Only present when strict mode would refuse this payload, so the
-	// preview of what would have been forwarded is not mistaken for it.
-	if len(res.Failed) > 0 {
+	if omitted := res.Warned - len(warnings); omitted > 0 {
+		out["warnings_omitted"] = omitted
+	}
+	// Only present when strict mode or the array rules would refuse this
+	// payload, so the preview of what would have been forwarded is not
+	// mistaken for it. Refused arrays leave the preview as the sender wrote it.
+	if len(res.Failed) > 0 || len(res.Refused) > 0 {
 		out["rejected"] = true
+	}
+	if len(res.Failed) > 0 {
 		out["failed"] = res.Failed
+	}
+	if len(res.Refused) > 0 {
+		out["refused"] = boundedRefusals(res.Refused)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -1076,6 +1109,29 @@ func transformFieldErrors(paths []string) []FieldError {
 	out := make([]FieldError, len(bounded))
 	for i, p := range bounded {
 		out[i] = FieldError{Field: p, Message: "value does not match its declared format"}
+	}
+	return out
+}
+
+// boundedRefusals is boundedPaths for refusals that carry their reason. The
+// paths are the map's own plus an index, and the reasons are fixed text and
+// counts, so no value and no partner-chosen string is in either.
+func boundedRefusals(fes []FieldError) []FieldError {
+	if len(fes) > maxLoggedFields {
+		fes = fes[:maxLoggedFields]
+	}
+	out := make([]FieldError, len(fes))
+	for i, fe := range fes {
+		out[i] = FieldError{Field: safeLogValue(fe.Field, maxLoggedFieldName), Message: fe.Message}
+	}
+	return out
+}
+
+// refusalPaths lists only the paths, for the audit trail, which gets names.
+func refusalPaths(fes []FieldError) []string {
+	out := make([]string, len(fes))
+	for i, fe := range fes {
+		out[i] = fe.Field
 	}
 	return out
 }
