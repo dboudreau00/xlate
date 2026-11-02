@@ -174,6 +174,35 @@ func TestTutorialTranscript(t *testing.T) {
     "payload": {"lines": [{"sku": "W-1"}, "stray"]}
   }`), `{"applied":0,"rejected":true,"refused":[{"field":"lines[1]","message":"must be an object, got string"}],
       "translated":{"lines":[{"sku":"W-1"},"stray"]},"warnings":[]}`)
+
+	// The list that is the whole body: two more rows, then an array payload.
+	r = admin(t, ts, "PUT", "/api/admin/accounts/acme", `{
+    "name": "Acme billing PSP",
+    "a": {"label": "Acme"},
+    "b": {"label": "PSP", "target_url": "`+psp.URL+`/payments",
+          "outbound_token": "psp-secret-credential-value"},
+    "map": [
+      {"a": "payment_id",  "b": "payment_proof"},
+      {"a": "customer.id", "b": "cust_id"},
+      {"a": "amount",      "b": "value"},
+      {"a": "created_at",  "b": "created_epoch",
+       "transform": {"kind": "date", "a_format": "rfc3339", "b_format": "unix"}},
+      {"a": "lines[].sku",     "b": "items[].product_code"},
+      {"a": "lines[].shipped", "b": "items[].shipped_epoch",
+       "transform": {"kind": "date", "a_format": "rfc3339", "b_format": "unix"}},
+      {"a": "[].sku",     "b": "[].product_code"},
+      {"a": "[].shipped", "b": "[].shipped_epoch",
+       "transform": {"kind": "date", "a_format": "rfc3339", "b_format": "unix"}}
+    ]
+  }`)
+	if r.status != 200 {
+		t.Fatalf("[§7] PUT with top-level array rows failed: %d %s", r.status, r.body)
+	}
+	same("bare list dry run", admin(t, ts, "POST", "/api/admin/accounts/acme/test", `{
+    "direction": "b2a",
+    "payload": [{"product_code": "W-1", "shipped_epoch": 1709283600}]
+  }`), `{"applied":2,"translated":[{"shipped":"2024-03-01T09:00:00Z","sku":"W-1"}],"warnings":[]}`)
+
 	// -- §9 rotate -----------------------------------------------------
 	r = admin(t, ts, "POST", "/api/admin/accounts/acme/rotate", `{"side":"a","kind":"inbound"}`)
 	t.Logf("\n[§9] rotate -> %d %s", r.status, strings.TrimSpace(string(r.body)))

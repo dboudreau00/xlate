@@ -118,7 +118,13 @@ func (s *SchemaStore) Observe(account string, dir Direction, payload map[string]
 	at := make(map[string]int, 16)
 	seen := make([]string, 0, 16)
 	truncated := false
-	walkShape("", payload, 0, false, func(path, typ string, mappable bool) {
+	// A body that is itself an array is walked as one, so its fields read
+	// "[].sku" and not the engine's name for it.
+	var root any = payload
+	if arr, bare := payload[rootKey]; bare {
+		root = arr
+	}
+	walkShape("", root, 0, false, func(path, typ string, mappable bool) {
 		if i, dup := at[path]; dup {
 			if !containsString(found[i].types, typ) {
 				found[i].types = append(found[i].types, typ)
@@ -221,7 +227,8 @@ func (s *SchemaStore) Forget(account string) {
 // fields of its object elements as "lines[].sku", at most maxArrayLen of
 // them, and any other element as "lines[]" with its type, which is how a
 // mixed array shows. Only one level can be addressed, so an array inside an
-// element (inElem) is reported and not walked.
+// element (inElem) is reported and not walked. A body that is itself an array
+// is walked from an empty prefix and reads "[].sku" and "[]".
 func walkShape(prefix string, v any, depth int, inElem bool, emit func(path, typ string, mappable bool)) {
 	switch t := v.(type) {
 	case map[string]any:
@@ -256,7 +263,11 @@ func walkShape(prefix string, v any, depth int, inElem bool, emit func(path, typ
 			}
 		}
 	case []any:
-		emit(prefix, "array", false)
+		// An empty prefix is a body that is itself an array: it has no path of
+		// its own, only elements ("[]").
+		if prefix != "" {
+			emit(prefix, "array", false)
+		}
 		if inElem {
 			return
 		}

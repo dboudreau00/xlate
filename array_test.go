@@ -32,6 +32,9 @@ func TestArrayPathSyntax(t *testing.T) {
 		{"a[].b", "a", "b"},
 		{"order.lines[].tax.rate", "order.lines", "tax.rate"},
 		{"with space[].and-dash", "with space", "and-dash"},
+		// A path that starts with [] addresses a body that is itself an array.
+		{"[].sku", rootKey, "sku"},
+		{"[].tax.rate", rootKey, "tax.rate"},
 	}
 	for _, tc := range valid {
 		if err := validateDotPath(tc.path); err != nil {
@@ -51,10 +54,13 @@ func TestArrayPathSyntax(t *testing.T) {
 		{"a[x].b", "positional"},
 		{"lines[]", "must name a field inside"},
 		{"order.lines[]", "must name a field inside"},
-		{"[].sku", "directly follow a field name"},
+		{"[]", "elements of the top-level array"},
 		{"a.[].b", "directly follow a field name"},
 		{"a[]b", "followed by a dot"},
+		{"[]x", "followed by a dot"},
 		{"a[].b[].c", "only one []"},
+		{"[].a[].b", "only one []"},
+		{"[][].b", "only one []"},
 		{"a[][].b", "only one []"},
 		{"a[].b[0]", "only allowed as the pair"},
 		{"a[].[b", "only allowed as the pair"},

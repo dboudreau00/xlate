@@ -400,6 +400,32 @@ curl -s -X POST $XL/api/admin/accounts/acme/test \
 
 The dry run hands the payload back as it came. A real request gets `422` with code `array_invalid` and the same `fields`, and nothing is forwarded. Lists are limited to 1 000 elements; `[]` and `null` are fine.
 
+**When the list is the whole body.** Some systems send or answer a list as a bare array, `[{...}, {...}]`. Start the path with `[]` and the rows apply to its elements. Append two rows to the `map` above and `PUT` the document again:
+
+```json
+{"a": "[].sku",     "b": "[].product_code"},
+{"a": "[].shipped", "b": "[].shipped_epoch",
+ "transform": {"kind": "date", "a_format": "rfc3339", "b_format": "unix"}}
+```
+
+The dry run then takes an array as the payload:
+
+```sh
+curl -s -X POST $XL/api/admin/accounts/acme/test \
+  -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+  -d '{"direction":"b2a","payload":[{"product_code":"W-1","shipped_epoch":1709283600}]}'
+```
+
+```json
+{
+  "applied": 2,
+  "translated": [{"shipped": "2024-03-01T09:00:00Z", "sku": "W-1"}],
+  "warnings": []
+}
+```
+
+The same rows translate a request body that is a bare list and an answer that is one. The README's [Top-level arrays](README.md#top-level-arrays) covers wrapping, the refusals, and why nothing changes for an account without such rows.
+
 Rows that cannot work are refused when you save them, the way the bad date layout was in step 6: a positional index such as `lines[0].sku`, a second `[]` in one path, or `[]` on only one side of a row. The README's [Arrays](README.md#arrays) section has the rest: what `drop_unmapped` does inside elements, and what is not supported.
 
 ## 8. The return leg

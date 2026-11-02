@@ -707,8 +707,9 @@ func TestResponsesOfTheNewMethodsArePassedThroughLikePost(t *testing.T) {
 		}
 		b.take(t)
 	})
-	// Known gap, not new: a JSON array is not an object, so it is relayed raw in
-	// the destination's vocabulary. Pinned so that closing the gap is a decision.
+	// A JSON array is not an object, so unless a row addresses the top level
+	// ("[].x", see array_root_api_test.go) it is relayed raw, in the destination's
+	// vocabulary. This account has no such row.
 	t.Run("a JSON array is relayed raw", func(t *testing.T) {
 		b.answer(200, "application/json", `[{"payment_proof":"p"}]`)
 		r := call(t, ts, "GET", "/t/duo/a2b", mtAIn, nil)

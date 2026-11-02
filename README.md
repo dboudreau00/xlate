@@ -161,13 +161,13 @@ Flags are validated at startup, so a typo fails fast instead of producing a quie
 
 Pipeline: method check → tripwire gate → authenticate → rate limit → validate → translate request → send the same method to the destination `target_url` with its `outbound_token` → translate JSON object responses back → relay upstream status and body. `Idempotency-Key` and `X-Request-Id` pass through, on every method. Redirects are returned, never followed. `X-Xlate-Applied` / `X-Xlate-Warnings` headers carry translation counts for **both** legs.
 
-The body of a POST, PUT or PATCH must be exactly one JSON object — trailing bytes after it are refused rather than silently dropped, so xlate and the destination can never read the same request two different ways. Correlation headers are checked for length and header-safety before they are forwarded.
+The body of a POST, PUT or PATCH must be exactly one JSON object (or, where a row addresses one, one JSON array: see [Top-level arrays](#top-level-arrays)) — trailing bytes after it are refused rather than silently dropped, so xlate and the destination can never read the same request two different ways. Correlation headers are checked for length and header-safety before they are forwarded.
 
 Errors are a stable envelope: `{"error": "<human>", "code": "<machine>"}`.
 
 | Status | `code` | Meaning |
 |---|---|---|
-| `400` | `bad_json` | body was not a single JSON object |
+| `400` | `bad_json` | body was not a single JSON object (or array, where a row addresses [one](#top-level-arrays)) |
 | `400` | `bad_body` | body could not be read (connection dropped mid-request) |
 | `400` | `validation_failed` | a correlation header was oversized or not header-safe; a GET or DELETE carried a body; a [query string](#methods) was refused |
 | `401` | `auth_invalid` | inbound token invalid for that side (feeds the tripwire) |
@@ -213,7 +213,7 @@ curl -G "$XL/t/acme/a2b" -H "Authorization: Bearer $ATOK" \
   --data-urlencode 'payment_id=P-9' --data-urlencode 'created_at=2026-08-06T12:00:00Z'
 ```
 
-The same for every method: the destination's own `outbound_token` is the only credential it sees, the caller's credential is never forwarded, `Idempotency-Key` and `X-Request-Id` are the only request headers that cross, the response is translated back and relayed with its status, and no query value reaches a log or the trail. Not supported: a destination path other than the configured `target_url` (xlate does not append the caller's path, so a resource such as `/orders/123` is addressed with a parameter or a field), conditional headers such as `If-Match`, and translating a response that is not a JSON object (an array comes back unchanged, as it does for POST).
+The same for every method: the destination's own `outbound_token` is the only credential it sees, the caller's credential is never forwarded, `Idempotency-Key` and `X-Request-Id` are the only request headers that cross, the response is translated back and relayed with its status, and no query value reaches a log or the trail. Not supported: a destination path other than the configured `target_url` (xlate does not append the caller's path, so a resource such as `/orders/123` is addressed with a parameter or a field), conditional headers such as `If-Match`, and translating a response that is not a JSON object, except a top-level array where a row addresses one ([Top-level arrays](#top-level-arrays)); without such a row an array comes back unchanged, as it does for POST.
 
 Grant `GET` or `DELETE` together with **drop unmapped** unless you want every parameter the partner sends to reach the destination.
 
@@ -252,11 +252,28 @@ A `[]` after a name addresses every element of the array there, so repeated grou
 - **The array moves as a unit.** It goes from its name on one side to its name on the other (`lines` becomes `items` although no row names `lines` on its own), and each element is translated by the rows under it as an object of its own. Dot paths work on both sides of the brackets: `order.lines[].tax.rate` to `invoice.rows[].vat`.
 - **What stays.** An element's unmapped fields stay in it. With **drop unmapped**, only the mapped fields of each element survive, and an element left with none becomes `{}`, so no element is ever removed and positions never change; an array no row addresses is dropped like any unmapped field. Without it, an array no row addresses crosses whole and untouched, inner names included. Moving the last field out of a nested object inside an element leaves the empty object behind, as it does anywhere else.
 - **Empty, ragged, null.** `[]` and `null` cross under the new name. Elements need not share keys: a mapped field an element lacks is a no-op for that element. A missing array is a no-op.
-- **Syntax, checked when the account is saved.** One `[]` per path, directly after a field name, with a field path after it (`lines[].sku`, `order.lines[].tax.rate`). Refused: positional indexes (`lines[0]`), `lines[]` with nothing after it (to rename the whole array use its plain name, `lines`), a second `[]` in a path (arrays inside arrays), `[]` on one side of a row only, and one array paired with two different arrays in different rows (an element's fields would be split between two arrays, and the return leg could not put them back together). The parent rule above covers arrays too: `lines` with `lines[].sku`, `lines.sku` with `lines[].sku` (one name used as an object and as an array) and `lines[].a` with `lines[].a.b` are all refused.
+- **Syntax, checked when the account is saved.** One `[]` per path, directly after a field name (or at the very start, for a body that is itself an array: [Top-level arrays](#top-level-arrays)), with a field path after it (`lines[].sku`, `order.lines[].tax.rate`). Refused: positional indexes (`lines[0]`), `lines[]` with nothing after it (to rename the whole array use its plain name, `lines`), a second `[]` in a path (arrays inside arrays), `[]` on one side of a row only, and one array paired with two different arrays in different rows (an element's fields would be split between two arrays, and the return leg could not put them back together). The parent rule above covers arrays too: `lines` with `lines[].sku`, `lines.sku` with `lines[].sku` (one name used as an object and as an array) and `lines[].a` with `lines[].a.b` are all refused.
 - **Checked on every message.** An array a row addresses is checked before anything is changed. If it holds more than 1,000 elements, is not an array (`null` is accepted), or has an element that is not an object, the message is refused: nothing is forwarded, strict transforms or not, because passing it on would show the other side the sender's field names. The length belongs to the payload, which is why this is the one array limit checked per message instead of when the account is saved. The sender gets `422` with code `array_invalid` and the paths of *its own* fields in the usual `fields` shape (`lines`, `lines[2]`), each with a reason and never a value. Arrays no row addresses are not checked. On the return leg the caller gets `502` with code `upstream_invalid` and none of the destination's response, with the same caveat as for [strict transforms](#strict-transforms): the destination has already acted. The trail records `ingest.rejected` with `reason` `array` or `response_array` and field names only, and the dry run reports `"rejected": true` with a `refused` list. A refused message is a data problem and does not feed the tripwire.
 - **Counting.** `X-Xlate-Applied` counts each mapped field in each element; the array itself is not counted. Strict transforms report the element in the path (`lines[2].shipped`). A message keeps at most 1,500 warnings and 1,500 failed paths however long its arrays are; the warning count in the header stays exact, and the dry run says how many it left out (`warnings_omitted`).
-- **Not supported:** arrays of scalars (`tags[]`), arrays inside arrays, positional indexes, and moving a field between an element and the top level. An array inside an element that no row addresses crosses whole. A query string (GET and DELETE) carries only strings, so a query parameter named like an addressed array is refused like any value that is not an array of objects.
+- **Not supported:** arrays of scalars (`tags[]`, or a top-level `["a","b"]`), arrays inside arrays, positional indexes, and moving a field between an element and the top level. An array inside an element that no row addresses crosses whole. A query string (GET and DELETE) carries only strings, so a query parameter named like an addressed array is refused like any value that is not an array of objects.
 - **Rolling back.** An xlate older than this change reads `lines[].sku` as a literal key, so a state file that holds array rows quietly stops translating arrays under it. Remove the rows before going back.
+
+#### Top-level arrays
+
+A path that starts with `[]` addresses the elements of a body that is itself an array, which is how a list endpoint often answers:
+
+```json
+{"a": "[].sku", "b": "[].product_code"}
+```
+
+`GET /t/acme/a2b`, with B answering `[{"product_code":"s1"}]`, gives the caller `[{"sku":"s1"}]`. It works wherever a body can be an array: the answer to any method, and the body of a POST, PUT or PATCH. Inside the elements everything is as it is for a named array.
+
+- **Opt-in.** A bare array is handled only if some row addresses the top level on the side the message comes from; for an answer, that is the destination's side. Without such a row nothing changes: a bare request body is `400 bad_json` and a bare answer is relayed raw, in the destination's field names. Once a row does address it, the `400` says "object or array".
+- **Bare on one side, wrapped on the other.** `{"a": "[].sku", "b": "data[].code"}` pairs A's bare list with B's `{"data": [...]}`. A bare list is wrapped on its way to the side that wraps. An object is unwrapped on its way to the side that does not only if its array is its only field: any other field would be lost, so the message is refused and those fields are named (`422 array_invalid` on a request, `502 upstream_invalid` on an answer). A paginated `{"data": [...], "total": 3}` therefore does not unwrap; map it as an object, with `data[].x` rows on both sides. With **drop unmapped**, a request does unwrap, and the other fields go as that setting always makes them go.
+- **One map, both kinds of body.** Rows for objects and rows for a top-level array may share a map. An object ignores the `[]` rows, and a bare array ignores the others.
+- **Refused as a named array is,** with the array written `[]` and its elements `[3]`: more than 1,000 elements, an element that is not an object (so `[1, 2]` is refused), and, in strict mode, `[3].shipped` for a date that cannot be converted. Nothing is forwarded and no value is reported.
+- **Dry run and discovery.** The dry run takes an array as `payload` and previews it as it would be sent; it refuses one where the data plane would, for want of a row that addresses it. Discovery records a bare-array request as `[].sku`, and `[]` for an element that is not an object, so the starter rows have the form a map takes. It records what partners send to xlate, not what a destination answers, so rows for an answer are written from the destination's documentation.
+- **Not supported:** a top-level array of scalars or of arrays, and an array inside the top-level array (`[].lines[].sku`).
 
 ### Date transforms
 
@@ -335,7 +352,7 @@ $ curl -sX POST localhost:8080/api/admin/accounts -H "Authorization: Bearer $TOK
 | `strict_transforms` | boolean, off by default; omitted on `PUT` keeps the stored value |
 | `rate_limit_per_min` | integer 0–1 000 000; `0`/omitted means no limit; omitted on `PUT` keeps the stored value |
 | `map` | ≤ 500 pairs; both sides required per row; no duplicate or parent/child paths per side; array rows pair one array with one array (see [Arrays](#arrays)) |
-| `map[].{a,b}` | ≤ 256 chars, ≤ 16 segments, no empty segment, no leading/trailing dot; the only bracket form is one `[]` per path, as in `lines[].sku`, with `[]` on both sides of a row or neither |
+| `map[].{a,b}` | ≤ 256 chars, ≤ 16 segments, no empty segment, no leading/trailing dot; the only bracket form is one `[]` per path, as in `lines[].sku` (or `[].sku` for a body that is itself an array), with `[]` on both sides of a row or neither |
 | `map[].transform` | `kind` must be `date`; both formats must be a known name, an epoch, or a round-tripping Go layout |
 
 ## Field discovery
@@ -359,7 +376,7 @@ The response also carries `suggest`, a set of starter mapping rows built from th
 
 In the console, the account editor has a **Field discovery** card: start or stop the window, see every observed path with its type and how often it arrived, and click **Add pair** to drop one straight into the field map with the other side left blank to fill in. Paths a map cannot address (containers, collapsed identifier maps, and arrays themselves) are listed but marked *not mappable*.
 
-Arrays are walked, because a map can address their elements: the fields of an array's object elements are listed as `lineItems[].sku` and are mappable, so the starter rows already have the form a map takes. Up to 1,000 elements of an array are read and their shapes merged, and a path seen in many elements counts once per message, so *Seen* still means messages. An element that is not an object is listed as `lineItems[]` with its type, which is how a mixed array shows during onboarding, and an array inside an element is listed but not walked, since a map addresses one level of array.
+Arrays are walked, because a map can address their elements: the fields of an array's object elements are listed as `lineItems[].sku` and are mappable, so the starter rows already have the form a map takes. Up to 1,000 elements of an array are read and their shapes merged, and a path seen in many elements counts once per message, so *Seen* still means messages. An element that is not an object is listed as `lineItems[]` with its type, which is how a mixed array shows during onboarding, and an array inside an element is listed but not walked, since a map addresses one level of array. A request body that is itself an array is recorded as `[].sku` and `[]` (see [Top-level arrays](#top-level-arrays)).
 
 It records **paths and types, never values**. That distinction is the whole design: field names are schema, field values are the payment identifiers and PII this gateway exists to pass through without reading. *Bodies are never captured* stays true. Three further guards, because the input is partner-controlled:
 
@@ -520,8 +537,8 @@ make build
 
 Five suites, all in `package main`:
 
-- **Unit** (`translate_test.go`, `feature_test.go`, `query_test.go`, `array_test.go`) — the pure engine, array addressing, transforms, audit chain, tripwire.
-- **Validation** (`validate_test.go`, `api_test.go`, `methods_test.go`, `array_api_test.go`) — every field rule, and the whole REST surface driven in-process through `httptest`.
+- **Unit** (`translate_test.go`, `feature_test.go`, `query_test.go`, `array_test.go`, `array_root_test.go`) — the pure engine, array addressing, transforms, audit chain, tripwire.
+- **Validation** (`validate_test.go`, `api_test.go`, `methods_test.go`, `array_api_test.go`, `array_root_api_test.go`) — every field rule, and the whole REST surface driven in-process through `httptest`.
 - **Regression** (`regression_test.go`, `reject_audit_test.go`, `coverage_gap_test.go`) — one test per defect found in review, plus the paths the others missed, so none of it can come back quietly.
 - **Adversarial** (`adversarial_test.go`) — the data plane is reachable by a partner, not an operator, and field discovery walks whatever JSON they send. These treat that input as hostile: 5000-deep nesting, unbounded distinct keys across requests, control bytes and markup smuggled through JSON key escapes, auth on every route added late, delete-during-discovery, and the body cap after the `no_target` reordering.
 - **End-to-end** (`e2e_test.go`, `methods_e2e_test.go`, build tag `e2e`) — builds the binary, runs it as a real subprocess against a mock upstream, and checks the behaviour this README documents: the error table, audit tamper-evidence, signed alerts, tripwire lockout and re-arm, redirect relaying, and that no payload or credential reaches a log.

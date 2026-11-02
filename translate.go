@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -18,6 +19,32 @@ const (
 	// exact.
 	maxNotes = 3 * maxMapPairs
 )
+
+// rootKey is the name a top-level array goes by inside the engine. A body that
+// is a bare array is wrapped as {rootKey: [...]} so that it is just an array
+// like any other, and unwrapped on the way out. Nothing else can have this
+// name: it is a single 0xFF byte, encoding/json turns invalid UTF-8 in an
+// object key into U+FFFD, and a path must be valid UTF-8 to be saved. (NUL
+// would not do, {"\u0000":1} is valid JSON.) It never reaches a log, a warning
+// or a response: pathName and elemName show it as the [] it was written with.
+const rootKey = "\xff"
+
+// pathName is a path as a person should read it.
+func pathName(p string) string {
+	if p == rootKey {
+		return "[]"
+	}
+	return p
+}
+
+// elemName names element i of the array at path p: lines[2], or [2] for the
+// top-level array.
+func elemName(p string, i int) string {
+	if p == rootKey {
+		return "[" + strconv.Itoa(i) + "]"
+	}
+	return p + "[" + strconv.Itoa(i) + "]"
+}
 
 // Direction selects which column of a FieldPair is the source.
 type Direction int
@@ -55,7 +82,8 @@ func ParseDirection(s string) (Direction, bool) {
 // FieldPair is one bidirectional vocabulary entry: field name on side A,
 // field name on side B. Names are dot-paths ("customer.id"); plain names
 // address top-level keys. A [] after a name addresses every element of the
-// array there ("lines[].sku"); see Translate.
+// array there ("lines[].sku"), and a path that starts with [] addresses the
+// elements of a body that is itself an array ("[].sku"); see Translate.
 type FieldPair struct {
 	A string `json:"a"`
 	B string `json:"b"`
@@ -181,16 +209,36 @@ func (r *TranslateResult) checkArray(path string, v any) {
 		// null is how a nil list is usually sent; it crosses as null.
 	case []any:
 		if len(t) > maxArrayLen {
-			r.refuse(path, fmt.Sprintf("has %d elements; at most %d are accepted", len(t), maxArrayLen))
+			r.refuse(pathName(path), fmt.Sprintf("has %d elements; at most %d are accepted", len(t), maxArrayLen))
 			return
 		}
 		for i, el := range t {
 			if _, ok := el.(map[string]any); !ok {
-				r.refuse(path+"["+strconv.Itoa(i)+"]", "must be an object, got "+jsonType(el))
+				r.refuse(elemName(path, i), "must be an object, got "+jsonType(el))
 			}
 		}
 	default:
-		r.refuse(path, "must be an array or null, got "+jsonType(v))
+		r.refuse(pathName(path), "must be an array or null, got "+jsonType(v))
+	}
+}
+
+// refuseStrays is the last check on a message whose result is a top-level
+// array: it can only be sent bare if it is all there is, and any other field
+// of the object it came from would be lost. Those fields are refused by name
+// rather than dropped.
+func (r *TranslateResult) refuseStrays() {
+	if _, bare := r.Out[rootKey]; !bare || len(r.Out) == 1 {
+		return
+	}
+	names := make([]string, 0, len(r.Out)-1)
+	for k := range r.Out {
+		if k != rootKey {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		r.refuse(k, "cannot sit beside a top-level array")
 	}
 }
 
@@ -236,8 +284,15 @@ func jsonType(v any) string {
 //     elements, a value that is not an array, and an element that is not an
 //     object cannot be translated as mapped: Refused names them, nothing is
 //     changed, and Out is the payload as it came.
+//   - a path that starts with [] ("[].sku") addresses the elements of a body
+//     that is itself an array. The caller wraps such a body as {rootKey: [...]}
+//     and, when Out holds rootKey, sends the array alone. An object whose array
+//     moves to the top level can only go out bare if the array was its only
+//     field; Refused names any others, which would otherwise be lost.
 func Translate(payload map[string]any, pairs []FieldPair, dir Direction, opt TranslateOptions) TranslateResult {
-	return translate(payload, pairs, dir, opt, true)
+	res := translate(payload, pairs, dir, opt, true)
+	res.refuseStrays()
+	return res
 }
 
 // translate is Translate. Rows are searched for arrays only when addressable
@@ -366,7 +421,7 @@ func translate(payload map[string]any, pairs []FieldPair, dir Direction, opt Tra
 			if rok, _ := setPath(out, ah.src, ah.val); !rok {
 				out[ah.src] = ah.val
 			}
-			res.warn("value for " + strconv.Quote(ah.dst) + " left at source " + strconv.Quote(ah.src))
+			res.warn("value for " + strconv.Quote(pathName(ah.dst)) + " left at source " + strconv.Quote(pathName(ah.src)))
 			continue
 		}
 		elems, _ := ah.val.([]any)
@@ -375,7 +430,7 @@ func translate(payload map[string]any, pairs []FieldPair, dir Direction, opt Tra
 			if em, isObj := el.(map[string]any); isObj {
 				er := translate(em, ah.rows, dir, opt, false)
 				elems[i] = er.Out
-				res.absorb(ah.src+"["+strconv.Itoa(i)+"]", er)
+				res.absorb(elemName(ah.src, i), er)
 			}
 		}
 	}
@@ -386,15 +441,35 @@ func translate(payload map[string]any, pairs []FieldPair, dir Direction, opt Tra
 
 // splitArrayPath splits "order.lines[].sku" at its [] into the path of the
 // array ("order.lines") and the path inside each of its elements ("sku").
-// validateDotPath is the strict judge of what an array path may look like;
-// this reads only what a validated path holds, and reports false for anything
-// that is not of that shape.
+// A path that starts with [] ("[].sku") addresses the top-level array, whose
+// name inside the engine is rootKey. validateDotPath is the strict judge of
+// what an array path may look like; this reads only what a validated path
+// holds, and reports false for anything that is not of that shape.
 func splitArrayPath(p string) (array, inner string, ok bool) {
 	i := strings.Index(p, "[]")
-	if i <= 0 || len(p) < i+4 || p[i+2] != '.' {
+	if i < 0 || len(p) < i+4 || p[i+2] != '.' {
 		return "", "", false
 	}
+	if i == 0 {
+		return rootKey, p[3:], true
+	}
 	return p[:i], p[i+3:], true
+}
+
+// addressesRoot reports whether some row addresses the top-level array on the
+// side a message comes from, which is what lets a bare array body through. A
+// bare array that no row addresses is not translated, as it never was.
+func addressesRoot(pairs []FieldPair, dir Direction) bool {
+	for _, p := range pairs {
+		src := p.A
+		if dir == BtoA {
+			src = p.B
+		}
+		if strings.HasPrefix(src, "[].") && isArrayRow(p) {
+			return true
+		}
+	}
+	return false
 }
 
 // getPath resolves a dot-path against nested map[string]any values.

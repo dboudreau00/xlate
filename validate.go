@@ -223,24 +223,28 @@ func validateDotPath(p string) error {
 }
 
 // checkArrayPath judges the one use of brackets a path may make: a single []
-// directly after a field name, with a field path after it ("lines[].sku").
-// Anything else is refused rather than guessed at: "items[0]" would silently
-// address a literal key named "items[0]", and an array inside an array, or a
-// [] with nothing after it, is more than the engine addresses.
+// directly after a field name ("lines[].sku"), or at the very start for a body
+// that is itself an array ("[].sku"), with a field path after it. Anything
+// else is refused rather than guessed at: "items[0]" would silently address a
+// literal key named "items[0]", and an array inside an array, or a [] with
+// nothing after it, is more than the engine addresses.
 func checkArrayPath(p string) error {
 	i := strings.Index(p, "[]")
 	if i < 0 {
 		return errors.New("only [] is supported inside a path, to address every element of an array " +
-			"(for example lines[].sku); positional indexes such as [0] are not")
+			"(for example lines[].sku, or [].sku when the body is itself an array); positional indexes such as [0] are not")
 	}
 	before, after := p[:i], p[i+2:]
 	switch {
 	case strings.Contains(after, "[]"):
 		return errors.New("only one [] per path is supported; arrays inside arrays cannot be addressed")
 	case strings.ContainsAny(before, "[]") || strings.ContainsAny(after, "[]"):
-		return errors.New("[ and ] are only allowed as the pair [] directly after a field name")
-	case before == "" || strings.HasSuffix(before, "."):
-		return errors.New("[] must directly follow a field name (for example lines[].sku)")
+		return errors.New("[ and ] are only allowed as the pair [] directly after a field name, or at the start of the path")
+	case strings.HasSuffix(before, "."):
+		return errors.New("[] must directly follow a field name (for example lines[].sku), " +
+			"or start the path for a body that is itself an array ([].sku)")
+	case before == "" && after == "":
+		return errors.New("must name a field inside the elements of the top-level array (for example [].sku)")
 	case after == "":
 		return errors.New("must name a field inside the array elements (for example lines[].sku), " +
 			"not end in []; to rename the whole array use its plain name")
@@ -337,11 +341,13 @@ func (ap *arrayPairing) add(i int, p FieldPair, ve *ValidationErrors) {
 		return
 	}
 	if prev, ok := ap.aToB[aArr]; ok && prev.array != bArr {
-		ve.add(row+".b", "array %q on side a is already paired with array %q on side b by map[%d]", aArr, prev.array, prev.row)
+		ve.add(row+".b", "array %q on side a is already paired with array %q on side b by map[%d]",
+			pathName(aArr), pathName(prev.array), prev.row)
 		return
 	}
 	if prev, ok := ap.bToA[bArr]; ok && prev.array != aArr {
-		ve.add(row+".a", "array %q on side b is already paired with array %q on side a by map[%d]", bArr, prev.array, prev.row)
+		ve.add(row+".a", "array %q on side b is already paired with array %q on side a by map[%d]",
+			pathName(bArr), pathName(prev.array), prev.row)
 		return
 	}
 	if _, ok := ap.aToB[aArr]; !ok {

@@ -326,8 +326,9 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// POST, PUT and PATCH carry a JSON object. GET and DELETE carry no body, so
-	// their input is the query string, translated as the same kind of object.
+	// POST, PUT and PATCH carry a JSON object, or an array where a row of the
+	// map addresses one ("[].sku"). GET and DELETE carry no body, so their input
+	// is the query string, translated as the same kind of object.
 	// The query of a POST, PUT or PATCH is not read, as it never has been.
 	var payload map[string]any
 	query := !methodHasBody(method)
@@ -346,8 +347,13 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		entry.ReqBytes = len(body)
-		if payload, err = decodeObjectStrict(body); err != nil {
-			fail(http.StatusBadRequest, "bad_json", "body must be a single JSON object")
+		rooted := addressesRoot(acct.Map, dir)
+		if payload, err = decodeBody(body, rooted); err != nil {
+			msg := "body must be a single JSON object"
+			if rooted {
+				msg = "body must be a single JSON object or array"
+			}
+			fail(http.StatusBadRequest, "bad_json", msg)
 			return
 		}
 	}
@@ -434,7 +440,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		b, err := json.Marshal(tres.Out)
+		b, err := json.Marshal(bodyOf(tres.Out))
 		if err != nil {
 			fail(http.StatusInternalServerError, "internal", "could not encode translated payload")
 			return
@@ -497,7 +503,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	ct := resp.Header.Get("Content-Type")
 	outResp := respBody
 	if strings.Contains(ct, "json") && len(respBody) > 0 {
-		if rm, err := decodeObjectStrict(respBody); err == nil {
+		if rm, err := decodeBody(respBody, addressesRoot(acct.Map, dir.Reverse())); err == nil {
 			rr := Translate(rm, acct.Map, dir.Reverse(), TranslateOptions{Strict: acct.StrictTransforms})
 			if len(rr.Failed) > 0 || len(rr.Refused) > 0 {
 				// The destination has already acted on the request, so this
@@ -519,7 +525,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 				jsonErrorCode(w, http.StatusBadGateway, "upstream_invalid", "upstream response could not be converted")
 				return
 			}
-			if b, err := json.Marshal(rr.Out); err == nil {
+			if b, err := json.Marshal(bodyOf(rr.Out)); err == nil {
 				outResp = b
 				entry.Applied += rr.Applied
 				// Return-leg warnings count too. Dropping them made a
@@ -824,8 +830,8 @@ func (s *Server) handleDiscoverReset(w http.ResponseWriter, r *http.Request) {
 // handleTest is a dry run: translate without forwarding.
 func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Direction string         `json:"direction"`
-		Payload   map[string]any `json:"payload"`
+		Direction string          `json:"direction"`
+		Payload   json.RawMessage `json:"payload"`
 	}
 	if err := decodeStrict(w, r, &in); err != nil {
 		writeValidationError(w, err)
@@ -837,24 +843,37 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var ve ValidationErrors
-	dir, ok := ParseDirection(in.Direction)
-	if !ok {
+	dir, dirOK := ParseDirection(in.Direction)
+	if !dirOK {
 		ve.add("direction", `must be "a2b" or "b2a"`)
 	}
-	if in.Payload == nil {
+	// The same rule as the data plane: a bare array is a payload only where a
+	// row addresses one on the sending side, and it previews as it would go out.
+	var payload map[string]any
+	if len(in.Payload) == 0 || bytes.Equal(bytes.TrimSpace(in.Payload), []byte("null")) {
 		ve.add("payload", "must be a JSON object")
+	} else if dirOK {
+		rooted := addressesRoot(acct.Map, dir)
+		var err error
+		if payload, err = decodeBody(in.Payload, rooted); err != nil {
+			if rooted {
+				ve.add("payload", "must be a JSON object or array")
+			} else {
+				ve.add("payload", "must be a JSON object")
+			}
+		}
 	}
 	if len(ve) > 0 {
 		writeValidationError(w, ve)
 		return
 	}
-	res := Translate(in.Payload, acct.Map, dir, TranslateOptions{DropUnmapped: acct.DropUnmapped, Strict: acct.StrictTransforms})
+	res := Translate(payload, acct.Map, dir, TranslateOptions{DropUnmapped: acct.DropUnmapped, Strict: acct.StrictTransforms})
 	warnings := res.Warnings
 	if warnings == nil {
 		warnings = []string{}
 	}
 	out := map[string]any{
-		"translated": res.Out,
+		"translated": bodyOf(res.Out),
 		"applied":    res.Applied,
 		"warnings":   warnings,
 	}
