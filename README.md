@@ -220,7 +220,7 @@ Parse failures at request time **fail open** by default: the value forwards untr
 Set `"strict_transforms": true` on an account (the console's **Strict transforms** toggle) when a value in the wrong representation is worse than no message at all. A value that cannot be converted then refuses the message instead of travelling with a warning:
 
 - **Request leg:** nothing is forwarded. The sender gets `422` with code `transform_failed` and the paths of *its own* fields that failed, in the usual `fields` shape. The destination's field names and formats, and the offending value, never appear in the response.
-- **Return leg:** the destination has already acted on the request, so this cannot undo it. The caller gets `502` with code `upstream_invalid` and none of the destination's response, rather than a value in the wrong representation. Send an `Idempotency-Key` so a retry is safe.
+- **Return leg:** the destination has already acted on the request, so this cannot undo it. The caller gets `502` with code `upstream_invalid` and none of the destination's response, rather than a value in the wrong representation. xlate passes an `Idempotency-Key` through, so if the destination honours one, a retry is safe.
 - Both land on the trail as `ingest.rejected` (`reason` is `transform` or `response_transform`; field *names* only, never values) and in the activity log. Neither feeds the tripwire: a partner sending bad dates is a data problem, not a credential guess.
 - The dry run reports `"rejected": true` and a `failed` list when strict mode would refuse the payload.
 
