@@ -98,6 +98,28 @@ func BenchmarkAuditEmitFsynced(b *testing.B) {
 	benchAudit(b, "ingest.denied")
 }
 
+// BenchmarkAuditEmitFsyncedParallel is the refused-request shape: many
+// callers at once, each needing its record durable before it may go on.
+// Run it with -cpu 1,8,16 to see the effect of concurrency.
+func BenchmarkAuditEmitFsyncedParallel(b *testing.B) {
+	a, err := OpenAudit(filepath.Join(b.TempDir(), "trail.jsonl"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer a.Close()
+	detail := map[string]any{"account": "acme", "dir": "a2b", "ip": "203.0.113.7"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if err := a.Emit("account:acme", "ingest.denied", detail); err != nil {
+				b.Error(err)
+				return
+			}
+		}
+	})
+}
+
 func benchAudit(b *testing.B, event string) {
 	b.Helper()
 	a, err := OpenAudit(filepath.Join(b.TempDir(), "trail.jsonl"))
@@ -225,7 +247,7 @@ func BenchmarkIngestRejected(b *testing.B) {
 // BenchmarkIngestBlocked measures a request to a locked-out account.
 // This is the path an attacker drives during a credential-guessing
 // burst, and it emits ingest.blocked — a critical event, so every one
-// costs an fsync under the audit mutex.
+// waits for an fsync, which concurrent callers share.
 func BenchmarkIngestBlocked(b *testing.B) {
 	ts, tok, done := benchGateway(b, "trail.jsonl")
 	defer done()

@@ -36,8 +36,9 @@ type AuditRecord struct {
 
 const genesisHash = "0000000000000000000000000000000000000000000000000000000000000000"
 
-// Event classes considered security-relevant get an fsync per record;
-// routine traffic records are flushed but rely on the OS for durability.
+// Event classes considered security-relevant are fsynced before Emit
+// returns; routine traffic records are written but rely on the OS for
+// durability.
 func criticalEvent(event string) bool {
 	switch {
 	case strings.HasPrefix(event, "tripwire."),
@@ -58,6 +59,27 @@ type AuditLog struct {
 	end  int64 // byte offset of the end of the last durable record
 	seq  uint64
 	prev string
+
+	// Group commit. A security-relevant record is acknowledged only after an
+	// fsync that began once it was written has returned, but one fsync makes
+	// every record written before it started durable, so callers that arrive
+	// together share it instead of each paying for their own. mu is not held
+	// across the fsync, so routine records keep flowing while one runs.
+	//
+	// syncMu is held across an fsync and is always taken before mu. synced,
+	// failed and syncErr are guarded by it.
+	//
+	// The fsync goes through syncF, a second handle on the same file. An
+	// fsync flushes the file, not the handle, so it still covers everything
+	// written through f; but on Windows I/O on one synchronous handle is
+	// serialised, so an fsync on f itself would hold up every Write on it and
+	// there would be nothing to share.
+	syncMu  sync.Mutex
+	syncF   *os.File
+	synced  uint64       // highest sequence number known to be durable
+	failed  uint64       // highest sequence number covered by a failed fsync
+	syncErr error        // the error that fsync returned
+	syncFn  func() error // syncF.Sync; a test swaps it
 }
 
 // OpenAudit opens (or creates, 0600) the trail and resumes the chain from
@@ -120,21 +142,40 @@ func OpenAudit(path string) (*AuditLog, error) {
 		f.Close()
 		return nil, err
 	}
+	sf, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	a.syncF, a.syncFn = sf, sf.Sync
 	return a, nil
 }
 
 // Emit appends one record. Failures are reported to the caller but must
 // not take the data plane down; the server logs them loudly instead.
 //
+// A security-relevant record is on disk before Emit returns. Concurrent
+// callers share fsyncs (see syncThrough), so a burst of refused requests
+// costs a few fsyncs rather than one each.
+func (a *AuditLog) Emit(actor, event string, detail map[string]any) error {
+	if a == nil {
+		return nil
+	}
+	seq, err := a.appendRecord(actor, event, detail)
+	if err != nil || !criticalEvent(event) {
+		return err
+	}
+	return a.syncThrough(seq)
+}
+
+// appendRecord writes one record and returns its sequence number.
+//
 // Records go to the file directly — with a flush per record a buffer adds
 // nothing, and bufio's sticky error state would turn one transient write
 // failure into a permanently dead trail. A failed append instead truncates
 // back to the last good record, so the file stays parseable and the next
 // Emit gets a clean retry.
-func (a *AuditLog) Emit(actor, event string, detail map[string]any) error {
-	if a == nil {
-		return nil
-	}
+func (a *AuditLog) appendRecord(actor, event string, detail map[string]any) (uint64, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	rec := AuditRecord{
@@ -148,20 +189,47 @@ func (a *AuditLog) Emit(actor, event string, detail map[string]any) error {
 	rec.Hash = hashRecord(&rec)
 	line, err := json.Marshal(rec)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if _, err := a.f.Write(append(line, '\n')); err != nil {
 		// Undo any partial bytes; if even that fails, the next Emit will
 		// land after a torn fragment, which reopen-recovery repairs.
 		_ = a.f.Truncate(a.end)
 		_, _ = a.f.Seek(a.end, io.SeekStart)
-		return err
+		return 0, err
 	}
 	a.seq, a.prev = rec.Seq, rec.Hash
 	a.end += int64(len(line)) + 1
-	if criticalEvent(event) {
-		return a.f.Sync()
+	return rec.Seq, nil
+}
+
+// syncThrough returns once the record numbered seq is on disk. A caller that
+// finds no fsync in progress becomes the leader and syncs on behalf of every
+// record written so far; the others queue on syncMu and, when their turn
+// comes, usually find theirs already covered. One that is not (written after
+// the leader looked) leads the next round, so nobody waits for more than the
+// fsync in flight plus their own.
+//
+// A failed fsync fails every record it covered, and those are not retried:
+// after a failed fsync the kernel may already have dropped the dirty pages, so
+// a later success would say nothing about them.
+func (a *AuditLog) syncThrough(seq uint64) error {
+	a.syncMu.Lock()
+	defer a.syncMu.Unlock()
+	if seq <= a.failed {
+		return a.syncErr
 	}
+	if seq <= a.synced {
+		return nil
+	}
+	a.mu.Lock()
+	upTo := a.seq
+	a.mu.Unlock()
+	if err := a.syncFn(); err != nil {
+		a.failed, a.syncErr = upTo, err
+		return err
+	}
+	a.synced = upTo
 	return nil
 }
 
@@ -169,10 +237,19 @@ func (a *AuditLog) Close() error {
 	if a == nil {
 		return nil
 	}
+	// Wait out an fsync in progress rather than closing the file under it.
+	a.syncMu.Lock()
+	defer a.syncMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.f.Sync()
-	return a.f.Close()
+	if a.f.Sync() == nil {
+		a.synced = a.seq
+	}
+	err := a.f.Close()
+	if serr := a.syncF.Close(); err == nil {
+		err = serr
+	}
+	return err
 }
 
 // hashRecord computes the chained hash over a canonical serialization:

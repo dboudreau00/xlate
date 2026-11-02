@@ -314,7 +314,7 @@ xlate -verify-audit /var/log/xlate/trail.jsonl
 # audit chain OK: 13 records, tail 5dc072ac0ffb…
 ```
 
-Restarts extend the chain (the tail is recovered on open), so one file spans process lifetimes. Security-relevant events (`tripwire.*`, `account.*`, `alert.*`, `server.*`, denials) are fsynced per record; routine `ingest.ok` records are flushed and rely on the OS.
+Restarts extend the chain (the tail is recovered on open), so one file spans process lifetimes. Security-relevant events (`tripwire.*`, `account.*`, `alert.*`, `server.*`, denials) are on disk (fsynced) before the request moves on, and concurrent ones share an fsync; routine `ingest.ok` records are written without one and rely on the OS.
 
 Events: `server.start/stop/panic`, `account.create/update/delete/rotate/frozen/rejected`, `ingest.ok/denied/blocked/error/rejected`, `tripwire.trip/reset`, `alert.sent/failed`. Ingest records carry metadata only (account, direction, ip, sizes, applied/warning counts, upstream status). **Bodies are never captured** — this traffic routinely carries payment identifiers and PII — and **token values never appear**; rotation logs the slot, not the secret.
 
@@ -364,11 +364,12 @@ Translation itself is not the cost. The engine is roughly a microsecond:
 | Tripwire gate / record | 14 ns / 80 ns |
 | Audit write, buffered (`ingest.ok`) | 30 µs |
 | **Audit write, fsynced (denials, `account.*`)** | **1.4 ms** |
+| Audit write, fsynced, 16 concurrent callers sharing fsyncs | 0.16 ms each |
 
 Two consequences worth knowing before you deploy:
 
 - **A successful request is dominated by the outbound call**, not by xlate. Your real ceiling is the destination's latency and connection pool, and the per-account `timeout_sec` bounds how long a slow destination can tie up a request.
-- **Refused requests are fsync-bound.** `ingest.denied` and `ingest.blocked` are security-relevant, so each is fsynced, and `AuditLog` serialises on one mutex. That puts the 401 and 429 paths at roughly **700 req/s** — slower than the success path — and a burst of them will queue behind the same mutex that successful requests use for their own audit write. Note that a tripwire lockout does not relieve this: it converts fsynced 401s into fsynced 429s at the same cost. If you expect to absorb credential-guessing floods at volume, put a rate limiter in front (the tripwire is an anomaly detector, not a limiter), or move the trail to faster storage. Group-committing the fsync would fix it properly and is not implemented.
+- **Refused requests cost an fsync, shared between concurrent callers.** `ingest.denied` and `ingest.blocked` are security-relevant, so each record is on disk before the request moves on, and a caller on its own still waits out a whole fsync (about 1.4 ms). Concurrent callers share: while an fsync runs the others write their records, and the next fsync makes all of them durable at once. Routine records such as `ingest.ok` no longer queue behind it. On this machine 16 concurrent refused requests went from about 750 to about 4 000 req/s (`BenchmarkIngestRejected` at 16 CPUs); on Linux, in a container on WSL2, the fsynced audit write at 16 callers fell from 1.6 ms to 0.2 ms. A tripwire lockout does not relieve the cost: it converts fsynced 401s into fsynced 429s. For credential-guessing floods at volume, put a rate limiter in front (the tripwire is an anomaly detector, not a limiter), or move the trail to faster storage.
 
 ## Security posture (0.3)
 
@@ -417,7 +418,7 @@ A corrupt or truncated state file stops the process at startup rather than quiet
 
 ## Deliberately out of scope for 0.3
 
-Enum/type value transforms, array path addressing, non-POST methods, retries/DLQ for failed forwards, HMAC signing of *data-plane* requests, per-account rate limits (tripwire is an anomaly response, not a limiter), multi-user admin (OIDC), SQLite backend, off-host audit shipping, group-committed audit fsync.
+Enum/type value transforms, array path addressing, non-POST methods, retries/DLQ for failed forwards, HMAC signing of *data-plane* requests, per-account rate limits (tripwire is an anomaly response, not a limiter), multi-user admin (OIDC), SQLite backend, off-host audit shipping.
 
 ## Layout
 
