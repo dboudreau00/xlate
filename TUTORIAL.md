@@ -431,7 +431,7 @@ Every error is `{"error": "...", "code": "..."}`. Branch on `code`, not on prose
 
 Rejections are also written to the audit trail as `account.rejected` with the offending field **names** — so if a partner's integration script is looping on a typo, you can see it server-side. Values are never recorded: an unknown field is very often a misspelled credential field with a live credential in it.
 
-**"A date isn't converting."** Parse failures at request time fail open — the value forwards unchanged and a warning is counted. Check `X-Xlate-Warnings` on the response and the `warnings` count in `GET /api/admin/logs`. The usual cause is real data not matching the declared format.
+**"A date isn't converting."** Parse failures at request time fail open — the value forwards unchanged and a warning is counted. Check `X-Xlate-Warnings` on the response and the `warnings` count in `GET /api/admin/logs`. The usual cause is real data not matching the declared format. If a wrong value is worse than no message, set `"strict_transforms": true` on the account and such requests are refused with `422` instead.
 
 **"Which fields actually moved?"** `X-Xlate-Applied` counts both legs. For the full picture use the dry run (§3) — it shows the exact output without sending anything.
 

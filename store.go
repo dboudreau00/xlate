@@ -50,6 +50,11 @@ type Account struct {
 	Map          []FieldPair `json:"map"`
 	DropUnmapped bool        `json:"drop_unmapped"`
 	TimeoutSec   int         `json:"timeout_sec"`
+	// StrictTransforms makes a failed value transform fatal: the request, or
+	// the destination's response, is refused instead of travelling with the
+	// value unconverted. Off keeps the fail-open rule. Left out of the
+	// document when off, so existing documents are unchanged.
+	StrictTransforms bool `json:"strict_transforms,omitempty"`
 	// DiscoverUntil time-boxes field discovery. While it is in the
 	// future, the shape of inbound payloads (paths and types, never
 	// values) is recorded so an operator can wire a map from what a
@@ -80,6 +85,10 @@ func (a *Account) clone() *Account {
 type accountInput struct {
 	Account
 	Enabled *bool `json:"enabled"`
+	// A pointer for the same reason: a PUT from a client that predates the
+	// setting must not quietly turn a fail-closed account back into a
+	// fail-open one.
+	StrictTransforms *bool `json:"strict_transforms"`
 }
 
 // resolve folds the input onto the stored document. On create an
@@ -95,6 +104,12 @@ func (in *accountInput) resolve(current *Account, creating bool) *Account {
 		a.Enabled = true
 	case current != nil:
 		a.Enabled = current.Enabled
+	}
+	switch {
+	case in.StrictTransforms != nil:
+		a.StrictTransforms = *in.StrictTransforms
+	case current != nil:
+		a.StrictTransforms = current.StrictTransforms
 	}
 	return &a
 }

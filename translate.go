@@ -53,12 +53,19 @@ type TranslateOptions struct {
 	// DropUnmapped, when true, builds the output only from mapped fields.
 	// When false (default) unmapped fields pass through untouched.
 	DropUnmapped bool
+	// Strict makes a failed value transform fatal. The warning is still
+	// recorded, and the field's source path is added to Failed.
+	Strict bool
 }
 
 type TranslateResult struct {
 	Out      map[string]any
 	Applied  int
 	Warnings []string
+	// Failed lists the source paths whose transform failed under Strict.
+	// When it is not empty Out must be refused, not forwarded: it carries
+	// the unconverted values the caller asked to be kept out.
+	Failed []string
 }
 
 // Translate renames fields in payload according to pairs and direction.
@@ -74,6 +81,8 @@ type TranslateResult struct {
 //   - destination path crosses a non-object value: the value stays at its
 //     source path untranslated, warning — never dropped
 //   - intermediate objects on the destination path are created as needed
+//   - transform fails: the value passes untransformed with a warning; under
+//     Strict its source path is also recorded in Failed
 func Translate(payload map[string]any, pairs []FieldPair, dir Direction, opt TranslateOptions) TranslateResult {
 	res := TranslateResult{}
 
@@ -113,8 +122,12 @@ func Translate(payload map[string]any, pairs []FieldPair, dir Direction, opt Tra
 				// Fail-open: the untransformed value is forwarded and the
 				// failure surfaces as a warning (header + logs). Rejecting
 				// the whole request over one bad date is the worse default
-				// for a pass-through gateway; strict mode is a roadmap knob.
+				// for a pass-through gateway, so strict mode is opt-in per
+				// account: the caller refuses whatever carries a Failed path.
 				res.Warnings = append(res.Warnings, "transform "+strconv.Quote(h.dst)+": "+err.Error())
+				if opt.Strict {
+					res.Failed = append(res.Failed, h.src)
+				}
 			} else {
 				h.val = v
 			}

@@ -175,8 +175,9 @@ Errors are a stable envelope: `{"error": "<human>", "code": "<machine>"}`.
 | `404` | `not_found` / `bad_direction` | unknown account / direction not `a2b`\|`b2a` |
 | `405` | `method_not_allowed` | wrong method; the `Allow` header lists the right ones |
 | `413` | `payload_too_large` | body exceeds `-max-body` |
+| `422` | `transform_failed` | [strict transforms](#strict-transforms): a value could not be converted, nothing was forwarded |
 | `429` | `account_locked` | tripwire lockout; `Retry-After` says when to return |
-| `502` | `no_target` / `upstream_failed` / `upstream_read` / `upstream_oversize` / `bad_target` | destination problems (detail in logs only) |
+| `502` | `no_target` / `upstream_failed` / `upstream_read` / `upstream_oversize` / `bad_target` / `upstream_invalid` | destination problems (detail in logs only); `upstream_invalid` is a response refused by strict transforms |
 | `500` | `internal` | encode failure or recovered panic |
 
 Every route answers with this envelope, including unknown paths and wrong methods.
@@ -200,7 +201,18 @@ Formats: named (`rfc3339`, `rfc3339nano`, `date`, `datetime`, `rfc1123`), epoch 
 
 Formats are validated when the account is saved, not when traffic arrives. A layout must round-trip a whole calendar date. This rejects the two things people actually type — `YYYY-MM-DD` (a strptime/moment.js habit; Go's `Format` treats it as a literal) and `iso8601` (Go reads the `1` as a month, so it formats and parses happily while encoding nothing) — along with partial layouts like `2006` or `15:04:05` that would invent a date on the way back. Without this check a typo is accepted at save time and then fails open on **every** request forever.
 
-Parse failures at request time **fail open**: the value forwards untransformed and the failure surfaces as a warning (`X-Xlate-Warnings` + logs), on the request leg and the return leg alike. Rejecting a whole request over one bad date is the worse default for a pass-through gateway; a strict mode is a roadmap knob.
+Parse failures at request time **fail open** by default: the value forwards untransformed and the failure surfaces as a warning (`X-Xlate-Warnings` + logs), on the request leg and the return leg alike. Rejecting a whole request over one bad date is the worse default for a pass-through gateway, so failing closed is a per-account switch.
+
+### Strict transforms
+
+Set `"strict_transforms": true` on an account (the console's **Strict transforms** toggle) when a value in the wrong representation is worse than no message at all. A value that cannot be converted then refuses the message instead of travelling with a warning:
+
+- **Request leg:** nothing is forwarded. The sender gets `422` with code `transform_failed` and the paths of *its own* fields that failed, in the usual `fields` shape. The destination's field names and formats, and the offending value, never appear in the response.
+- **Return leg:** the destination has already acted on the request, so this cannot undo it. The caller gets `502` with code `upstream_invalid` and none of the destination's response, rather than a value in the wrong representation. Send an `Idempotency-Key` so a retry is safe.
+- Both land on the trail as `ingest.rejected` (`reason` is `transform` or `response_transform`; field *names* only, never values) and in the activity log. Neither feeds the tripwire: a partner sending bad dates is a data problem, not a credential guess.
+- The dry run reports `"rejected": true` and a `failed` list when strict mode would refuse the payload.
+
+Only value transforms are strict. A destination path blocked by a non-object value still leaves the value at its source path with a warning. A `PUT` that omits `strict_transforms` keeps the stored value; send `false` to turn it off.
 
 ## Control plane
 
@@ -254,6 +266,7 @@ $ curl -sX POST localhost:8080/api/admin/accounts -H "Authorization: Bearer $TOK
 | `*.target_url` | absolute `http(s)`, host required, ≤ 2048 chars, no embedded credentials, no fragment |
 | `*.inbound_token` / `*.outbound_token` | 16–512 chars, printable non-space ASCII (they are written into an `Authorization` header) |
 | `timeout_sec` | 1–300; `0`/omitted takes the default of 15. Out of range is refused, not clamped |
+| `strict_transforms` | boolean, off by default; omitted on `PUT` keeps the stored value |
 | `map` | ≤ 500 pairs; both sides required per row; no duplicate or parent/child paths per side |
 | `map[].{a,b}` | ≤ 256 chars, ≤ 16 segments, no empty segment, no leading/trailing dot, no array indexing |
 | `map[].transform` | `kind` must be `date`; both formats must be a known name, an epoch, or a round-tripping Go layout |
@@ -303,7 +316,7 @@ xlate -verify-audit /var/log/xlate/trail.jsonl
 
 Restarts extend the chain (the tail is recovered on open), so one file spans process lifetimes. Security-relevant events (`tripwire.*`, `account.*`, `alert.*`, `server.*`, denials) are fsynced per record; routine `ingest.ok` records are flushed and rely on the OS.
 
-Events: `server.start/stop/panic`, `account.create/update/delete/rotate/frozen/rejected`, `ingest.ok/denied/blocked/error`, `tripwire.trip/reset`, `alert.sent/failed`. Ingest records carry metadata only (account, direction, ip, sizes, applied/warning counts, upstream status). **Bodies are never captured** — this traffic routinely carries payment identifiers and PII — and **token values never appear**; rotation logs the slot, not the secret.
+Events: `server.start/stop/panic`, `account.create/update/delete/rotate/frozen/rejected`, `ingest.ok/denied/blocked/error/rejected`, `tripwire.trip/reset`, `alert.sent/failed`. Ingest records carry metadata only (account, direction, ip, sizes, applied/warning counts, upstream status). **Bodies are never captured** — this traffic routinely carries payment identifiers and PII — and **token values never appear**; rotation logs the slot, not the secret.
 
 `account.rejected` records a refused admin mutation: method, path, ip, a `reason` (`unknown_field` / `invalid_field` / `bad_request`) and the offending field **names**. Never values — an unknown field is very often a typo'd credential field with a live credential in it (`inbound_tokenn`), and that is exactly what must not reach a log. Names are stripped of control characters and length-bounded so a client-chosen key cannot forge a log line.
 
@@ -404,7 +417,7 @@ A corrupt or truncated state file stops the process at startup rather than quiet
 
 ## Deliberately out of scope for 0.3
 
-Enum/type value transforms and strict (fail-closed) transform mode, array path addressing, non-POST methods, retries/DLQ for failed forwards, HMAC signing of *data-plane* requests, per-account rate limits (tripwire is an anomaly response, not a limiter), multi-user admin (OIDC), SQLite backend, off-host audit shipping, group-committed audit fsync.
+Enum/type value transforms, array path addressing, non-POST methods, retries/DLQ for failed forwards, HMAC signing of *data-plane* requests, per-account rate limits (tripwire is an anomaly response, not a limiter), multi-user admin (OIDC), SQLite backend, off-host audit shipping, group-committed audit fsync.
 
 ## Layout
 

@@ -315,9 +315,25 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tres := Translate(payload, acct.Map, dir, TranslateOptions{DropUnmapped: acct.DropUnmapped})
+	tres := Translate(payload, acct.Map, dir, TranslateOptions{DropUnmapped: acct.DropUnmapped, Strict: acct.StrictTransforms})
 	entry.Applied = tres.Applied
 	entry.Warnings = len(tres.Warnings)
+	if len(tres.Failed) > 0 {
+		// Strict mode: nothing is forwarded. The sender is told which of its
+		// own fields could not be converted. Never the destination's names
+		// and never a value; the trail gets names only, like every record.
+		entry.Status = http.StatusUnprocessableEntity
+		entry.Err = "strict: transform refused"
+		s.auditEmit("account:"+id, "ingest.rejected", map[string]any{
+			"account": id, "dir": dirStr, "ip": ip, "reason": "transform", "fields": boundedPaths(tres.Failed),
+		})
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":  "one or more fields could not be converted to the destination's format",
+			"code":   "transform_failed",
+			"fields": transformFieldErrors(tres.Failed),
+		})
+		return
+	}
 
 	outBody, err := json.Marshal(tres.Out)
 	if err != nil {
@@ -379,7 +395,22 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	outResp := respBody
 	if strings.Contains(ct, "json") && len(respBody) > 0 {
 		if rm, err := decodeObjectStrict(respBody); err == nil {
-			rr := Translate(rm, acct.Map, dir.Reverse(), TranslateOptions{})
+			rr := Translate(rm, acct.Map, dir.Reverse(), TranslateOptions{Strict: acct.StrictTransforms})
+			if len(rr.Failed) > 0 {
+				// The destination has already acted on the request, so this
+				// cannot undo it. It keeps a value in the wrong
+				// representation from reaching the caller, who is told the
+				// response was unusable, in no vocabulary but its own.
+				entry.Status = http.StatusBadGateway
+				entry.Err = "strict: response transform refused"
+				entry.Warnings += len(rr.Warnings)
+				s.auditEmit("account:"+id, "ingest.rejected", map[string]any{
+					"account": id, "dir": dirStr, "ip": ip, "reason": "response_transform",
+					"upstream": resp.StatusCode, "fields": boundedPaths(rr.Failed),
+				})
+				jsonErrorCode(w, http.StatusBadGateway, "upstream_invalid", "upstream response could not be converted")
+				return
+			}
 			if b, err := json.Marshal(rr.Out); err == nil {
 				outResp = b
 				entry.Applied += rr.Applied
@@ -706,16 +737,23 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 		writeValidationError(w, ve)
 		return
 	}
-	res := Translate(in.Payload, acct.Map, dir, TranslateOptions{DropUnmapped: acct.DropUnmapped})
+	res := Translate(in.Payload, acct.Map, dir, TranslateOptions{DropUnmapped: acct.DropUnmapped, Strict: acct.StrictTransforms})
 	warnings := res.Warnings
 	if warnings == nil {
 		warnings = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"translated": res.Out,
 		"applied":    res.Applied,
 		"warnings":   warnings,
-	})
+	}
+	// Only present when strict mode would refuse this payload, so the
+	// preview of what would have been forwarded is not mistaken for it.
+	if len(res.Failed) > 0 {
+		out["rejected"] = true
+		out["failed"] = res.Failed
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -929,6 +967,30 @@ func classifyNetErr(err error) string {
 		return "connect"
 	}
 	return "other"
+}
+
+// boundedPaths makes configured field paths safe and short enough for a log
+// line, an audit record or an error body, and caps how many are listed.
+func boundedPaths(paths []string) []string {
+	if len(paths) > maxLoggedFields {
+		paths = paths[:maxLoggedFields]
+	}
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = safeLogValue(p, maxLoggedFieldName)
+	}
+	return out
+}
+
+// transformFieldErrors reports strict-mode failures in the same shape as
+// every other field-level error.
+func transformFieldErrors(paths []string) []FieldError {
+	bounded := boundedPaths(paths)
+	out := make([]FieldError, len(bounded))
+	for i, p := range bounded {
+		out[i] = FieldError{Field: p, Message: "value does not match its declared format"}
+	}
+	return out
 }
 
 func truncate(s string, n int) string {

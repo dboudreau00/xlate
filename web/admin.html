@@ -576,6 +576,8 @@
       <div class="row" style="gap:26px">
         <label class="toggle"><input type="checkbox" id="ed-drop"><span class="track"></span>
           Drop unmapped fields <span class="hint">(forward only what the map produces)</span></label>
+        <label class="toggle"><input type="checkbox" id="ed-strict"><span class="track"></span>
+          Strict transforms <span class="hint">(refuse a request when a value cannot be converted)</span></label>
         <div>
           <label class="f" for="ed-timeout" style="margin-top:0">Upstream timeout (seconds)</label>
           <input type="number" id="ed-timeout" min="1" max="300" style="width:110px">
@@ -849,7 +851,7 @@ async function openEditor(id) {
     S.E = { id: "", name: "", enabled: true,
       a: { label: "System A", target_url: "", inbound_token: "", outbound_token: "" },
       b: { label: "System B", target_url: "", inbound_token: "", outbound_token: "" },
-      map: [{ a: "", b: "" }], drop_unmapped: false, timeout_sec: 15 };
+      map: [{ a: "", b: "" }], drop_unmapped: false, strict_transforms: false, timeout_sec: 15 };
     S.createMode = true;
   }
   renderEditor();
@@ -871,6 +873,7 @@ function renderEditor() {
   setTok("ea-tin", E.a.inbound_token); setTok("ea-tout", E.a.outbound_token);
   setTok("eb-tin", E.b.inbound_token); setTok("eb-tout", E.b.outbound_token);
   $("ed-drop").checked = !!E.drop_unmapped;
+  $("ed-strict").checked = !!E.strict_transforms;
   $("ed-timeout").value = E.timeout_sec || 15;
   $("btn-delete").classList.toggle("hidden", create);
   $("ed-tools").classList.toggle("hidden", create);
@@ -1048,6 +1051,7 @@ function collect() {
   E.a.label = $("ea-label").value; E.b.label = $("eb-label").value;
   E.a.target_url = $("ea-url").value.trim(); E.b.target_url = $("eb-url").value.trim();
   E.drop_unmapped = $("ed-drop").checked;
+  E.strict_transforms = $("ed-strict").checked;
   E.timeout_sec = parseInt($("ed-timeout").value, 10) || 15;
   // Inbound tokens: blank means "keep stored" server-side; send what we
   // hold. Outbound tokens are editable here, so the console always
@@ -1205,7 +1209,9 @@ $("btn-test").addEventListener("click", async () => {
   try {
     const r = await api(`/api/admin/accounts/${encodeURIComponent(S.E.id)}/test`,
       { method: "POST", body: JSON.stringify({ direction: $("test-dir").value, payload }) });
-    let html = `<div class="okline">${r.applied} field${r.applied === 1 ? "" : "s"} translated</div>`;
+    let html = r.rejected
+      ? `<div class="errline">Strict mode would refuse this request: ${esc((r.failed || []).join(", "))} could not be converted.</div>`
+      : `<div class="okline">${r.applied} field${r.applied === 1 ? "" : "s"} translated</div>`;
     html += `<pre class="out">${esc(JSON.stringify(r.translated, null, 2))}</pre>`;
     for (const w of r.warnings) html += `<div class="warnline">⚠ ${esc(w)}</div>`;
     $("test-out").innerHTML = html;
