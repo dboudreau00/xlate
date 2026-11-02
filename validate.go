@@ -355,6 +355,7 @@ func validateEndpoint(side string, ep Endpoint, ve *ValidationErrors) {
 	if ep.TargetURL != "" {
 		validateTargetURL(side+".target_url", ep.TargetURL, ve)
 	}
+	validateMethods(side+".inbound_methods", ep.InboundMethods, ve)
 
 	for _, tok := range []struct {
 		field, val string

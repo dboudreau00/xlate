@@ -332,11 +332,25 @@ func redactErr(err error, rawURL string) string {
 // redactTargetErr is redactErr for a forwarded request. net/http builds
 // the error from the request's re-serialised URL, which can differ from
 // the configured string, so that form is redacted as well.
+//
+// The longer of the two goes first. A request that carries a query is the
+// configured URL plus that query, so replacing the configured one first
+// leaves the query, which is partner data, in the text.
 func redactTargetErr(err error, rawURL string) string {
-	s := redactErr(err, rawURL)
+	if err == nil {
+		return ""
+	}
+	urls := []string{rawURL}
 	var ue *url.Error
-	if errors.As(err, &ue) && ue.URL != "" {
-		s = strings.ReplaceAll(s, ue.URL, redactURL(ue.URL))
+	if errors.As(err, &ue) {
+		urls = append(urls, ue.URL)
+	}
+	sort.SliceStable(urls, func(i, j int) bool { return len(urls[i]) > len(urls[j]) })
+	s := err.Error()
+	for _, u := range urls {
+		if u != "" {
+			s = strings.ReplaceAll(s, u, redactURL(u))
+		}
 	}
 	return s
 }

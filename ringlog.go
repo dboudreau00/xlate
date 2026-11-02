@@ -13,6 +13,7 @@ type LogEntry struct {
 	Time      time.Time `json:"time"`
 	Account   string    `json:"account"`
 	Direction string    `json:"direction"`
+	Method    string    `json:"method,omitempty"`   // sanitised and capped: it is caller-chosen
 	Status    int       `json:"status"`             // status returned to caller
 	Upstream  int       `json:"upstream,omitempty"` // status from destination, if reached
 	LatencyMs int64     `json:"latency_ms"`

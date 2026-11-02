@@ -297,6 +297,15 @@
   .toggle input:checked + .track::after{transform:translateX(16px)}
   .toggle input:focus-visible + .track{outline:2px solid var(--sideB);outline-offset:1px}
 
+  /* method chips: the methods a side may send */
+  .methods{display:flex;flex-wrap:wrap;gap:6px}
+  .mchip{position:relative;display:inline-flex;cursor:pointer}
+  .mchip input{position:absolute;opacity:0;pointer-events:none}
+  .mchip span{padding:5px 9px;border:1px solid var(--line);border-radius:6px;font:600 11px/1 var(--mono);
+    color:var(--dim);transition:border-color .15s ease-out,color .15s ease-out}
+  .mchip input:checked + span{color:var(--txt);border-color:var(--ok)}
+  .mchip input:focus-visible + span{outline:2px solid var(--sideB);outline-offset:1px}
+
   /* ---------- mapping grid (signature) ---------- */
   .mapgrid{border:1px solid var(--line);border-radius:8px;overflow:hidden}
   .maphead,.maprow{display:grid;grid-template-columns:1fr 44px 1fr 40px;align-items:center}
@@ -548,6 +557,8 @@
           <button class="tiny" data-tok="ea-tout">Reveal</button>
           <button class="tiny" data-copy="ea-tout">Copy</button>
           <button class="tiny" data-rotate="a:outbound">Rotate</button></div>
+        <label class="f">Allowed methods <span class="hint">(A may send these; GET and DELETE carry the query string)</span></label>
+        <div class="methods" id="ea-methods"></div>
       </div>
       <div class="card sideB" style="margin:0">
         <label class="f" for="eb-label"><span class="chipB">Side B</span> · label</label>
@@ -564,6 +575,8 @@
           <button class="tiny" data-tok="eb-tout">Reveal</button>
           <button class="tiny" data-copy="eb-tout">Copy</button>
           <button class="tiny" data-rotate="b:outbound">Rotate</button></div>
+        <label class="f">Allowed methods <span class="hint">(B may send these; GET and DELETE carry the query string)</span></label>
+        <div class="methods" id="eb-methods"></div>
       </div>
     </div>
 
@@ -857,6 +870,28 @@ async function loadAccounts() {
 $("btn-new").addEventListener("click", () => openEditor(null));
 
 /* ---------- editor ---------- */
+// The methods a side may be granted, in the order the server reports them.
+// GET and DELETE carry their fields in the query string, the rest a JSON body.
+const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+const bodyless = m => m === "GET" || m === "DELETE";
+// A side with no list is POST only.
+const methodsOf = ep => (ep.inbound_methods && ep.inbound_methods.length)
+  ? METHODS.filter(m => ep.inbound_methods.includes(m)) : ["POST"];
+
+function renderMethods(side) {
+  const have = methodsOf(S.E[side]);
+  $("e" + side + "-methods").innerHTML = METHODS.map(m =>
+    `<label class="mchip"><input type="checkbox" value="${m}"${have.includes(m) ? " checked" : ""}><span>${m}</span></label>`).join("");
+}
+function pickedMethods(side) {
+  const boxes = [...$("e" + side + "-methods").querySelectorAll("input")];
+  const picked = boxes.filter(b => b.checked).map(b => b.value);
+  // The server reads an empty list as "keep what is stored", so the console
+  // never sends one: POST is the default and the floor.
+  if (!picked.length) { boxes.find(b => b.value === "POST").checked = true; return ["POST"]; }
+  return picked;
+}
+
 async function openEditor(id) {
   if (id) {
     S.E = await api("/api/admin/accounts/" + encodeURIComponent(id));
@@ -866,8 +901,8 @@ async function openEditor(id) {
   } else {
     S.tw = null;
     S.E = { id: "", name: "", enabled: true,
-      a: { label: "System A", target_url: "", inbound_token: "", outbound_token: "" },
-      b: { label: "System B", target_url: "", inbound_token: "", outbound_token: "" },
+      a: { label: "System A", target_url: "", inbound_token: "", outbound_token: "", inbound_methods: ["POST"] },
+      b: { label: "System B", target_url: "", inbound_token: "", outbound_token: "", inbound_methods: ["POST"] },
       map: [{ a: "", b: "" }], drop_unmapped: false, strict_transforms: false, rate_limit_per_min: 0, timeout_sec: 15 };
     S.createMode = true;
   }
@@ -889,6 +924,7 @@ function renderEditor() {
   $("ea-url").value = E.a.target_url; $("eb-url").value = E.b.target_url;
   setTok("ea-tin", E.a.inbound_token); setTok("ea-tout", E.a.outbound_token);
   setTok("eb-tin", E.b.inbound_token); setTok("eb-tout", E.b.outbound_token);
+  renderMethods("a"); renderMethods("b");
   $("ed-drop").checked = !!E.drop_unmapped;
   $("ed-strict").checked = !!E.strict_transforms;
   $("ed-timeout").value = E.timeout_sec || 15;
@@ -1081,6 +1117,8 @@ function collect() {
   E.b.inbound_token = $("eb-tin").dataset.real;
   E.a.outbound_token = $("ea-tout").dataset.real || "none";
   E.b.outbound_token = $("eb-tout").dataset.real || "none";
+  E.a.inbound_methods = pickedMethods("a");
+  E.b.inbound_methods = pickedMethods("b");
 }
 
 $("btn-save").addEventListener("click", async () => {
@@ -1238,18 +1276,37 @@ $("btn-test").addEventListener("click", async () => {
 });
 
 /* integration snippets */
+// One curl per method the side may send. A body method sends JSON; GET and
+// DELETE send the same fields in the query string, which curl -G builds.
+function curlFor(method, url, tok) {
+  const auth = `-H 'Authorization: Bearer ${tok || "<inbound token>"}'`;
+  if (bodyless(method))
+    return `curl -G -X ${method} ${url} \\\n  ${auth} \\\n  --data-urlencode 'field=value'`;
+  return `curl -X ${method} ${url} \\\n  ${auth} \\\n  -H 'Content-Type: application/json' \\\n  -d '{"field":"value"}'`;
+}
+function curlsFor(ep, url) {
+  const methods = methodsOf(ep);
+  return { methods, text: methods.map(m => curlFor(m, url, ep.inbound_token)).join("\n\n") };
+}
+
 function renderIntegration() {
   const E = S.E, base = location.origin;
-  const block = (dir, from, to, tok) => {
+  const block = (dir, from, to, ep) => {
     const url = `${base}/t/${E.id}/${dir}`;
-    const curl = `curl -X POST ${url} \\\n  -H 'Authorization: Bearer ${tok || "<inbound token>"}' \\\n  -H 'Content-Type: application/json' \\\n  -d '{"field":"value"}'`;
-    const curlMasked = curl.replace(tok || "\u0000", tok ? mask(tok) : "<inbound token>");
+    const tok = ep.inbound_token;
+    const { methods, text } = curlsFor(ep, url);
+    // Every occurrence: with several methods the token appears in each curl.
+    const curlMasked = tok ? text.split(tok).join(mask(tok)) : text;
+    const how = methods.length === 1 && methods[0] === "POST"
+      ? `${esc(from)} POSTs here with its inbound token; xlate translates and delivers to ${esc(to)}.`
+      : `${esc(from)} may send ${methods.join(", ")} here with its inbound token; xlate translates and delivers the same method to ${esc(to)}.` +
+        (methods.some(bodyless) ? " GET and DELETE carry their fields in the query string." : "");
     return `<div class="snip">
       <div class="dirchip" style="margin-bottom:6px">` +
       `<span class="${dir === "a2b" ? "chipA" : "chipB"}">${esc(from)}</span>` +
       ` <span style="color:var(--faint)">→</span> ` +
       `<span class="${dir === "a2b" ? "chipB" : "chipA"}">${esc(to)}</span></div>
-      <div class="hint">${esc(from)} POSTs here with its inbound token; xlate translates and delivers to ${esc(to)}. The JSON response comes back in ${esc(from)}'s own field names.</div>
+      <div class="hint">${how} The JSON response comes back in ${esc(from)}'s own field names.</div>
       <pre class="out">${esc(curlMasked)}</pre>
       <div class="row" style="margin-top:8px">
         <button class="tiny" data-curl="${dir}">Copy curl with token</button>
@@ -1257,12 +1314,11 @@ function renderIntegration() {
       </div></div>`;
   };
   $("integration").innerHTML =
-    block("a2b", E.a.label, E.b.label, E.a.inbound_token) +
-    block("b2a", E.b.label, E.a.label, E.b.inbound_token);
+    block("a2b", E.a.label, E.b.label, E.a) +
+    block("b2a", E.b.label, E.a.label, E.b);
   $("integration").querySelectorAll("[data-curl]").forEach(b => b.addEventListener("click", () => {
     const dir = b.dataset.curl;
-    const tok = dir === "a2b" ? S.E.a.inbound_token : S.E.b.inbound_token;
-    copyText(`curl -X POST ${base}/t/${S.E.id}/${dir} \\\n  -H 'Authorization: Bearer ${tok}' \\\n  -H 'Content-Type: application/json' \\\n  -d '{"field":"value"}'`);
+    copyText(curlsFor(dir === "a2b" ? S.E.a : S.E.b, `${base}/t/${S.E.id}/${dir}`).text);
   }));
   $("integration").querySelectorAll("[data-url]").forEach(b =>
     b.addEventListener("click", () => copyText(b.dataset.url)));
@@ -1293,10 +1349,11 @@ async function loadLogs() {
         : e.direction === "b2a"
           ? `<span class="chipB">B</span><span style="color:var(--faint)">→</span><span class="chipA">A</span>`
           : `<span class="hint">${esc(e.direction)}</span>`;
+      const verb = e.method ? `<span class="hint">${esc(e.method)}</span> ` : "";
       return `<tr>
         <td class="hint mono">${esc(fmtTime(e.time))}</td>
         <td class="mono">${esc(e.account)}</td>
-        <td class="dirchip">${dir}</td>
+        <td class="dirchip">${verb}${dir}</td>
         <td class="mono ${stClass(e.status)}">${e.status || ""}</td>
         <td class="mono ${stClass(e.upstream)}">${e.upstream || ""}</td>
         <td class="mono">${e.latency_ms}</td>

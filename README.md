@@ -4,7 +4,7 @@
 
 
 
-Bidirectional REST field-translation gateway. Two systems that speak different field vocabularies POST to xlate; it renames (and optionally converts) fields per an account's map, forwards to the other side with that side's credentials, and reverse-maps the JSON response — each party only ever sees its own field names.
+Bidirectional REST field-translation gateway. Two systems that speak different field vocabularies call xlate (POST, and GET, PUT, PATCH or DELETE where you allow them); it renames (and optionally converts) fields per an account's map, forwards to the other side with that side's credentials, and reverse-maps the JSON response — each party only ever sees its own field names.
 
 ```
              POST /t/{account}/a2b                       POST {B.target_url}
@@ -157,11 +157,11 @@ Flags are validated at startup, so a typo fails fast instead of producing a quie
 
 ## Data plane
 
-`POST /t/{account_id}/{a2b|b2a}` with `Authorization: Bearer <side's inbound_token>` (or `X-Api-Key`) and a JSON **object** body.
+`/t/{account_id}/{a2b|b2a}` with `Authorization: Bearer <side's inbound_token>` (or `X-Api-Key`). A side may send POST unless the account grants it more ([Methods](#methods)). A POST, PUT or PATCH carries a JSON **object** body. A GET or DELETE carries its fields in the query string.
 
-Pipeline: tripwire gate → authenticate → rate limit → validate → translate request → POST to destination `target_url` with its `outbound_token` → translate JSON object responses back → relay upstream status and body. `Idempotency-Key` and `X-Request-Id` pass through. Redirects are returned, never followed. `X-Xlate-Applied` / `X-Xlate-Warnings` headers carry translation counts for **both** legs.
+Pipeline: method check → tripwire gate → authenticate → rate limit → validate → translate request → send the same method to the destination `target_url` with its `outbound_token` → translate JSON object responses back → relay upstream status and body. `Idempotency-Key` and `X-Request-Id` pass through, on every method. Redirects are returned, never followed. `X-Xlate-Applied` / `X-Xlate-Warnings` headers carry translation counts for **both** legs.
 
-The body must be exactly one JSON object — trailing bytes after it are refused rather than silently dropped, so xlate and the destination can never read the same request two different ways. Correlation headers are checked for length and header-safety before they are forwarded.
+The body of a POST, PUT or PATCH must be exactly one JSON object — trailing bytes after it are refused rather than silently dropped, so xlate and the destination can never read the same request two different ways. Correlation headers are checked for length and header-safety before they are forwarded.
 
 Errors are a stable envelope: `{"error": "<human>", "code": "<machine>"}`.
 
@@ -169,13 +169,13 @@ Errors are a stable envelope: `{"error": "<human>", "code": "<machine>"}`.
 |---|---|---|
 | `400` | `bad_json` | body was not a single JSON object |
 | `400` | `bad_body` | body could not be read (connection dropped mid-request) |
-| `400` | `validation_failed` | a correlation header was oversized or not header-safe |
+| `400` | `validation_failed` | a correlation header was oversized or not header-safe; a GET or DELETE carried a body; a [query string](#methods) was refused |
 | `401` | `auth_invalid` | inbound token invalid for that side (feeds the tripwire) |
 | `403` | `account_disabled` | account disabled (manually or by tripwire freeze) |
 | `404` | `not_found` / `bad_direction` | unknown account / direction not `a2b`\|`b2a` |
-| `405` | `method_not_allowed` | wrong method; the `Allow` header lists the right ones |
+| `405` | `method_not_allowed` | that side may not use this method; the `Allow` header lists the ones it may ([Methods](#methods)) |
 | `413` | `payload_too_large` | body exceeds `-max-body` |
-| `422` | `transform_failed` | [strict transforms](#strict-transforms): a value could not be converted, nothing was forwarded |
+| `422` | `transform_failed` | [strict transforms](#strict-transforms), or any GET or DELETE query: a value could not be converted, nothing was forwarded |
 | `429` | `account_locked` | tripwire lockout; `Retry-After` says when to return |
 | `429` | `rate_limited` | that side's [rate limit](#rate-limits) is spent; `Retry-After` says when to return |
 | `502` | `no_target` / `upstream_failed` / `upstream_read` / `upstream_oversize` / `bad_target` / `upstream_invalid` | destination problems (detail in logs only); `upstream_invalid` is a response refused by strict transforms |
@@ -183,11 +183,44 @@ Errors are a stable envelope: `{"error": "<human>", "code": "<machine>"}`.
 
 Every route answers with this envelope, including unknown paths and wrong methods.
 
+### Methods
+
+A side may send POST unless the account grants it more. Set `inbound_methods` on an endpoint (the console's **Allowed methods** chips) to any of `GET`, `POST`, `PUT`, `PATCH` and `DELETE`:
+
+```json
+"a": {"target_url": "https://a.example/hook", "inbound_methods": ["GET", "POST"]},
+"b": {"target_url": "https://b.example/hook", "inbound_methods": ["PUT", "DELETE"]}
+```
+
+- **Per side, and replayed.** The list is what *that side* may send to xlate, and xlate sends the same method to the other side. Letting A `GET` from B does not let B `GET` from A, so a partner can be given exactly the verbs it needs. Left out, a side may only `POST`, which is what every account written before this setting means.
+- **A fixed set.** `HEAD`, `OPTIONS`, `TRACE` and `CONNECT` cannot be granted. The forwarded method is picked from the five above, never from the request's own text, and override headers and parameters (`X-HTTP-Method-Override`, `_method`) are not honoured.
+- **Refused early.** A method that is not on the sender's list gets `405` and an `Allow` header naming the ones that are. The check comes before the tripwire gate and before authentication, where a wrong method has always been refused. It is no credential guess, so it never feeds the tripwire, spends no rate limit and writes no audit record; the activity log shows it. A request to an unknown account is `404`, whatever the method.
+- **Entries.** Case does not matter (`get` is stored as `GET`); duplicates and unknown names are refused. A `PUT` of the account that omits the list, or sends it empty, keeps the stored one. Send `["POST"]` to narrow a side back.
+
+**POST, PUT and PATCH** carry a JSON object and are translated exactly as a POST always was. A query string on them is ignored.
+
+**GET and DELETE** carry no body. Their query string is the input, and it goes through the same engine and the same map:
+
+- A pair applies to a parameter of that name. With `{"a": "payment_id", "b": "payment_proof"}`, `?payment_id=1` from A reaches B as `?payment_proof=1`. A dotted name addresses the same nested field it does in a body (`customer.id` and `party.ref`), and a date transform converts the value. Swapped pairs, collisions and **drop unmapped** behave as they do for a body. An emptied container produces no parameter, so, unlike in a body, no container name crosses.
+- Values are strings. A repeated name (`id=1&id=2`) crosses as a list and is renamed whole; a transform needs a single value. A name with brackets (`filter[status]`) or an empty segment is not addressable by a pair, so it passes through unmapped, or is dropped under **drop unmapped**.
+- The destination's `target_url` may carry a query of its own (`https://b.example/api?key=...`). Translated parameters are appended after it, and it is sent byte for byte. A parameter with the name of one the target fixes, in any letter case, is refused with `400`: the target's value always wins, so a partner cannot replace a credential you put there.
+- Also refused with `400 validation_failed`: a body on GET or DELETE, a query over 8 KiB or 100 values, a malformed one (`%zz`, `;` as a separator), and `a=1&a.b=2`, where one name is both a value and the parent of another.
+- **Always strict.** A value that cannot be converted refuses the request with `422 transform_failed`, whatever `strict_transforms` says, and nothing is forwarded. A filter that fails to convert and travels on raw can be ignored by the destination, which widens what a GET returns or what a DELETE removes. The response leg follows the account's setting, as for every method.
+
+```sh
+curl -G "$XL/t/acme/a2b" -H "Authorization: Bearer $ATOK" \
+  --data-urlencode 'payment_id=P-9' --data-urlencode 'created_at=2026-08-06T12:00:00Z'
+```
+
+The same for every method: the destination's own `outbound_token` is the only credential it sees, the caller's credential is never forwarded, `Idempotency-Key` and `X-Request-Id` are the only request headers that cross, the response is translated back and relayed with its status, and no query value reaches a log or the trail. Not supported: a destination path other than the configured `target_url` (xlate does not append the caller's path, so a resource such as `/orders/123` is addressed with a parameter or a field), conditional headers such as `If-Match`, and translating a response that is not a JSON object (an array comes back unchanged, as it does for POST).
+
+Grant `GET` or `DELETE` together with **drop unmapped** unless you want every parameter the partner sends to reach the destination.
+
 ### Rate limits
 
 Set `"rate_limit_per_min": 600` on an account (the console's **Rate limit** field) to cap how fast each side may send. `0` or omitted means no limit, and the ceiling is 1 000 000. It is a token bucket: an idle side may burst up to one minute's allowance, then is held to the limit as tokens refill continuously (600 a minute is 10 a second). Past it, a request is refused with `429` and code `rate_limited`, `Retry-After` says how long until the next one would pass, and nothing is read or forwarded.
 
-- **Per side.** Side A and side B each have their own bucket, so one party flooding cannot use up the other's callbacks.
+- **Per side.** Side A and side B each have their own bucket, so one party flooding cannot use up the other's callbacks. Every method spends from the same bucket, and a request refused with `405` spends nothing.
 - **After authentication.** Only a caller holding the side's inbound token spends its allowance. Account ids are not secrets, so metering anonymous traffic would let anyone who had read one starve the partner. Credential guessing is the tripwire's job, and a limiter in front of xlate is still the right answer to a flood (see [Performance](#performance)).
 - **Not an alarm.** Rate-limited requests do not feed the tripwire. They are written to the trail as `ingest.limited`, at most one record per side every 10 seconds with a count of the refusals it stands for, and the console counts them under Refused.
 - **In memory, per instance.** Buckets start full after a restart or a change of the limit, and two instances behind one balancer each enforce the limit on their own.
@@ -224,7 +257,7 @@ Set `"strict_transforms": true` on an account (the console's **Strict transforms
 - Both land on the trail as `ingest.rejected` (`reason` is `transform` or `response_transform`; field *names* only, never values) and in the activity log. Neither feeds the tripwire: a partner sending bad dates is a data problem, not a credential guess.
 - The dry run reports `"rejected": true` and a `failed` list when strict mode would refuse the payload.
 
-Only value transforms are strict. A destination path blocked by a non-object value still leaves the value at its source path with a warning. A `PUT` that omits `strict_transforms` keeps the stored value; send `false` to turn it off.
+Only value transforms are strict. A destination path blocked by a non-object value still leaves the value at its source path with a warning. A `PUT` that omits `strict_transforms` keeps the stored value; send `false` to turn it off. The query string of a GET or DELETE is always strict, whatever this setting says ([Methods](#methods)).
 
 ## Control plane
 
@@ -277,6 +310,7 @@ $ curl -sX POST localhost:8080/api/admin/accounts -H "Authorization: Bearer $TOK
 | `*.label` | ≤ 80 chars, no control characters |
 | `*.target_url` | absolute `http(s)`, host required, ≤ 2048 chars, no embedded credentials, no fragment |
 | `*.inbound_token` / `*.outbound_token` | 16–512 chars, printable non-space ASCII (they are written into an `Authorization` header) |
+| `*.inbound_methods` | list of `GET`, `POST`, `PUT`, `PATCH`, `DELETE` (case-insensitive, no duplicates, at most 16 entries); omitted means POST only; omitted or empty on `PUT` keeps the stored list |
 | `timeout_sec` | 1–300; `0`/omitted takes the default of 15. Out of range is refused, not clamped |
 | `strict_transforms` | boolean, off by default; omitted on `PUT` keeps the stored value |
 | `rate_limit_per_min` | integer 0–1 000 000; `0`/omitted means no limit; omitted on `PUT` keeps the stored value |
@@ -333,7 +367,7 @@ xlate -verify-audit /var/log/xlate/trail.jsonl
 
 Restarts extend the chain (the tail is recovered on open), so one file spans process lifetimes. Security-relevant events (`tripwire.*`, `account.*`, `alert.*`, `server.*`, denials) are on disk (fsynced) before the request moves on, and concurrent ones share an fsync; routine `ingest.ok` records are written without one and rely on the OS.
 
-Events: `server.start/stop/panic`, `account.create/update/delete/rotate/frozen/rejected`, `ingest.ok/denied/blocked/error/rejected/limited`, `tripwire.trip/reset`, `alert.sent/failed`. Ingest records carry metadata only (account, direction, ip, sizes, applied/warning counts, upstream status). **Bodies are never captured** — this traffic routinely carries payment identifiers and PII — and **token values never appear**; rotation logs the slot, not the secret.
+Events: `server.start/stop/panic`, `account.create/update/delete/rotate/frozen/rejected`, `ingest.ok/denied/blocked/error/rejected/limited`, `tripwire.trip/reset`, `alert.sent/failed`. Ingest records carry metadata only (account, direction, method, ip, sizes, applied/warning counts, upstream status). `account.create` and `account.update` list the methods each side may send, so widening a side to DELETE shows on the trail itself. **Bodies are never captured** — this traffic routinely carries payment identifiers and PII — and **token values never appear**; rotation logs the slot, not the secret.
 
 `account.rejected` records a refused admin mutation: method, path, ip, a `reason` (`unknown_field` / `invalid_field` / `bad_request`) and the offending field **names**. Never values — an unknown field is very often a typo'd credential field with a live credential in it (`inbound_tokenn`), and that is exactly what must not reach a log. Names are stripped of control characters and length-bounded so a client-chosen key cannot forge a log line.
 
@@ -396,7 +430,8 @@ Two consequences worth knowing before you deploy:
 - Handler panics are recovered to a clean `500`; the stack goes to the server log and audit trail, never the wire. Upstream failure detail (internal topology) likewise stays in logs.
 - Client IPs come from the socket peer. `-trust-proxy` opts into the first `X-Forwarded-For` hop — only enable behind a proxy that strips client-supplied XFF, because this value feeds tripwire forensics.
 - Neither outbound client follows redirects: a 3xx from a destination is relayed to the caller, and one from the alert webhook counts as a failed delivery, so `X-Xlate-Signature` and the alert body never reach a `Location` target. Whole-request reads are bounded (`ReadTimeout` 30s) so a client that declares a body and stalls cannot hold a connection.
-- Errors from failed forwards are redacted to `scheme://host` before they reach the activity log or the audit trail, because a target URL can carry a credential in its query string.
+- Errors from failed forwards are redacted to `scheme://host` before they reach the activity log or the audit trail, because a target URL can carry a credential in its query string. The query a GET or DELETE appends is covered too: the full request URL is redacted first, so none of it is left behind.
+- The method that is forwarded is picked from a fixed set of five, never from the request's own text, and override headers and parameters are not honoured. The caller of a GET or DELETE adds only percent-encoded query parameters: scheme, host and path stay the operator's, and a parameter that collides with one the target URL fixes is refused. Unmapped parameters pass through like unmapped fields, so grant GET or DELETE together with **drop unmapped**.
 - The forwarding client honours `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`. For `https://` targets a proxy only sees a tunnel; for `http://` targets it sees the outbound bearer token and the body. Keep those variables unset unless you mean to route egress through a proxy you trust.
 - Unsigned alert webhooks are spoofable; the startup log warns if `-alert-webhook` is set without `-alert-secret`.
 - Admin UI ships a strict CSP that also refuses framing (`frame-ancestors 'none'`, `X-Frame-Options: DENY`); run behind TLS. Target URLs are admin-supplied and unrestricted — an SSRF primitive if untrusted parties gain admin access; egress-filter the host if that matters.
@@ -436,11 +471,11 @@ A corrupt or truncated state file stops the process at startup rather than quiet
 
 ## Deliberately out of scope for 0.3
 
-Enum/type value transforms, array path addressing, non-POST methods, retries/DLQ for failed forwards, HMAC signing of *data-plane* requests, multi-user admin (OIDC), SQLite backend, off-host audit shipping.
+Enum/type value transforms, array path addressing, forwarding the caller's URL path, HEAD and OPTIONS, retries/DLQ for failed forwards, HMAC signing of *data-plane* requests, multi-user admin (OIDC), SQLite backend, off-host audit shipping.
 
 ## Layout
 
-Flat `package main` on purpose at this size — `translate.go` (pure engine), `transform.go` (date fx), `validate.go` (request decoding + field rules), `discover.go` (payload shape capture), `store.go` (state + persistence), `server.go` (HTTP), `ringlog.go` (live ops view), `stats.go` (node counters), `audit.go` (chained trail + verifier), `alerts.go` (tripwire + webhook), `main.go`, `web/admin.html` (embedded). `demo/` is scaffolding, not shipped code; its mock destination is a separate module.
+Flat `package main` on purpose at this size — `translate.go` (pure engine), `transform.go` (date fx), `validate.go` (request decoding + field rules), `discover.go` (payload shape capture), `methods.go` (the methods a side may send), `query.go` (a query string as the payload of a GET or DELETE), `store.go` (state + persistence), `server.go` (HTTP), `ringlog.go` (live ops view), `stats.go` (node counters), `audit.go` (chained trail + verifier), `alerts.go` (tripwire + webhook), `main.go`, `web/admin.html` (embedded). `demo/` is scaffolding, not shipped code; its mock destination is a separate module.
 
 ## Testing
 
@@ -459,11 +494,11 @@ make build
 
 Five suites, all in `package main`:
 
-- **Unit** (`translate_test.go`, `feature_test.go`) — the pure engine, transforms, audit chain, tripwire.
-- **Validation** (`validate_test.go`, `api_test.go`) — every field rule, and the whole REST surface driven in-process through `httptest`.
+- **Unit** (`translate_test.go`, `feature_test.go`, `query_test.go`) — the pure engine, transforms, audit chain, tripwire.
+- **Validation** (`validate_test.go`, `api_test.go`, `methods_test.go`) — every field rule, and the whole REST surface driven in-process through `httptest`.
 - **Regression** (`regression_test.go`, `reject_audit_test.go`, `coverage_gap_test.go`) — one test per defect found in review, plus the paths the others missed, so none of it can come back quietly.
 - **Adversarial** (`adversarial_test.go`) — the data plane is reachable by a partner, not an operator, and field discovery walks whatever JSON they send. These treat that input as hostile: 5000-deep nesting, unbounded distinct keys across requests, control bytes and markup smuggled through JSON key escapes, auth on every route added late, delete-during-discovery, and the body cap after the `no_target` reordering.
-- **End-to-end** (`e2e_test.go`, build tag `e2e`) — builds the binary, runs it as a real subprocess against a mock upstream, and checks the behaviour this README documents: the error table, audit tamper-evidence, signed alerts, tripwire lockout and re-arm, redirect relaying, and that no payload or credential reaches a log.
+- **End-to-end** (`e2e_test.go`, `methods_e2e_test.go`, build tag `e2e`) — builds the binary, runs it as a real subprocess against a mock upstream, and checks the behaviour this README documents: the error table, audit tamper-evidence, signed alerts, tripwire lockout and re-arm, redirect relaying, and that no payload or credential reaches a log.
 - **Benchmarks** (`bench_test.go`) — the numbers in *Performance*.
 
 Plus `tutorial_verify_test.go` (build tag `tutorial`), which replays every step of [TUTORIAL.md](TUTORIAL.md) against a real server and prints the actual responses. Run `make docs-check` after changing anything user-visible; documentation that lies is worse than documentation that is missing.

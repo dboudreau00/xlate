@@ -69,8 +69,8 @@ func NewServer(store *Store, logs *Ring, adminToken string, maxBody int64, admin
 		adminHTML:  adminHTML,
 		client: &http.Client{
 			Transport: transport,
-			// Never follow redirects on forwarded POSTs; hand the 3xx
-			// back to the caller instead of replaying the body.
+			// Never follow redirects on forwarded requests; hand the 3xx
+			// back to the caller instead of replaying the request.
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -81,8 +81,10 @@ func NewServer(store *Store, logs *Ring, adminToken string, maxBody int64, admin
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	// Data plane.
-	mux.HandleFunc("POST /t/{id}/{dir}", s.handleIngest)
+	// Data plane. Every method reaches the handler: which ones a side may use
+	// is that side's setting, so the 405 is answered there, once the account
+	// is known.
+	mux.HandleFunc("/t/{id}/{dir}", s.handleIngest)
 
 	// Control plane.
 	mux.HandleFunc("GET /api/admin/accounts", s.admin(s.handleAccountsList))
@@ -110,7 +112,6 @@ func (s *Server) routes() http.Handler {
 	// Wrong-method and unknown-route fallbacks. ServeMux answers both
 	// with plain text by default, which would be the only two responses
 	// in the whole API that are not the documented JSON envelope.
-	mux.HandleFunc("/t/{id}/{dir}", methodNotAllowed("POST"))
 	mux.HandleFunc("/api/admin/accounts", methodNotAllowed("GET", "POST"))
 	mux.HandleFunc("/api/admin/accounts/{id}", methodNotAllowed("GET", "PUT", "DELETE"))
 	mux.HandleFunc("/api/admin/accounts/{id}/rotate", methodNotAllowed("POST"))
@@ -208,7 +209,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	dirStr := r.PathValue("dir")
 
-	entry := LogEntry{Time: start.UTC(), Account: id, Direction: dirStr}
+	entry := LogEntry{Time: start.UTC(), Account: id, Direction: dirStr, Method: safeLogValue(r.Method, 16)}
 	defer func() {
 		entry.LatencyMs = time.Since(start).Milliseconds()
 		s.logs.Add(entry)
@@ -236,6 +237,22 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	entry.AccountKnown = true
 
+	from, to := acct.A, acct.B
+	if dir == BtoA {
+		from, to = acct.B, acct.A
+	}
+	// A method this side may not send is refused before the tripwire gate and
+	// before authentication, which is where a wrong method has always been
+	// refused. It is no credential guess, so it must not feed the tripwire, and
+	// it must cost nothing: no audit record, no rate-limit token.
+	method, known := dataMethod(r.Method)
+	if !known || !from.allows(method) {
+		allow := strings.Join(from.methodList(), ", ")
+		w.Header().Set("Allow", allow)
+		fail(http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed; try "+allow)
+		return
+	}
+
 	// Tripwire gate sits in front of authentication: while locked, the
 	// endpoint answers 429 to every caller, valid credentials included.
 	// That is the point of a lockout — during an active credential-
@@ -245,21 +262,17 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		entry.Status = http.StatusTooManyRequests
 		entry.Err = "tripwire locked"
 		s.auditEmit("account:"+id, "ingest.blocked", map[string]any{
-			"account": id, "dir": dirStr, "ip": ip, "unlock_in_sec": int(rem.Seconds()) + 1,
+			"account": id, "dir": dirStr, "method": method, "ip": ip, "unlock_in_sec": int(rem.Seconds()) + 1,
 		})
 		jsonErrorCode(w, http.StatusTooManyRequests, "account_locked", "account temporarily locked")
 		return
 	}
 
-	from, to := acct.A, acct.B
-	if dir == BtoA {
-		from, to = acct.B, acct.A
-	}
 	if from.InboundToken == "" || !tokenEqual(bearerFrom(r), from.InboundToken) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="xlate"`)
 		fail(http.StatusUnauthorized, "auth_invalid", "invalid token")
 		s.auditEmit("account:"+id, "ingest.denied", map[string]any{
-			"account": id, "dir": dirStr, "ip": ip,
+			"account": id, "dir": dirStr, "method": method, "ip": ip,
 		})
 		if info := s.trip.RecordDenied(id, ip); info != nil {
 			s.onTrip(acct, info)
@@ -269,7 +282,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if !acct.Enabled {
 		fail(http.StatusForbidden, "account_disabled", "account disabled")
 		s.auditEmit("account:"+id, "ingest.denied", map[string]any{
-			"account": id, "dir": dirStr, "ip": ip, "reason": "disabled",
+			"account": id, "dir": dirStr, "method": method, "ip": ip, "reason": "disabled",
 		})
 		return
 	}
@@ -286,7 +299,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		entry.RateLimited = true
 		if refusal.Report {
 			s.auditEmit("account:"+id, "ingest.limited", map[string]any{
-				"account": id, "dir": dirStr, "ip": ip,
+				"account": id, "dir": dirStr, "method": method, "ip": ip,
 				"limit_per_min": acct.RateLimitPerMin, "refused": refusal.Suppressed,
 			})
 		}
@@ -312,12 +325,31 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	entry.ReqBytes = len(body)
 
-	payload, err := decodeObjectStrict(body)
-	if err != nil {
-		fail(http.StatusBadRequest, "bad_json", "body must be a single JSON object")
-		return
+	// POST, PUT and PATCH carry a JSON object. GET and DELETE carry no body, so
+	// their input is the query string, translated as the same kind of object.
+	// The query of a POST, PUT or PATCH is not read, as it never has been.
+	var payload map[string]any
+	query := !methodHasBody(method)
+	if query {
+		if len(body) > 0 {
+			entry.Status = http.StatusBadRequest
+			writeValidationError(w, ValidationErrors{{Field: "body",
+				Message: method + " carries no body; send the parameters in the query string"}})
+			return
+		}
+		entry.ReqBytes = len(r.URL.RawQuery)
+		if payload, err = queryPayload(r.URL.RawQuery); err != nil {
+			entry.Status = http.StatusBadRequest
+			writeValidationError(w, err)
+			return
+		}
+	} else {
+		entry.ReqBytes = len(body)
+		if payload, err = decodeObjectStrict(body); err != nil {
+			fail(http.StatusBadRequest, "bad_json", "body must be a single JSON object")
+			return
+		}
 	}
 
 	// Record the payload's shape while onboarding. This runs before
@@ -337,7 +369,10 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tres := Translate(payload, acct.Map, dir, TranslateOptions{DropUnmapped: acct.DropUnmapped, Strict: acct.StrictTransforms})
+	// A query carries filters and selectors. One that fails to convert and
+	// travels on raw can be ignored by the destination, which widens what a GET
+	// returns or a DELETE removes, so a query is always strict.
+	tres := Translate(payload, acct.Map, dir, TranslateOptions{DropUnmapped: acct.DropUnmapped, Strict: acct.StrictTransforms || query})
 	entry.Applied = tres.Applied
 	entry.Warnings = len(tres.Warnings)
 	if len(tres.Failed) > 0 {
@@ -347,7 +382,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		entry.Status = http.StatusUnprocessableEntity
 		entry.Err = "strict: transform refused"
 		s.auditEmit("account:"+id, "ingest.rejected", map[string]any{
-			"account": id, "dir": dirStr, "ip": ip, "reason": "transform", "fields": boundedPaths(tres.Failed),
+			"account": id, "dir": dirStr, "method": method, "ip": ip, "reason": "transform", "fields": boundedPaths(tres.Failed),
 		})
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 			"error":  "one or more fields could not be converted to the destination's format",
@@ -357,20 +392,47 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outBody, err := json.Marshal(tres.Out)
-	if err != nil {
-		fail(http.StatusInternalServerError, "internal", "could not encode translated payload")
-		return
+	// A bodied method forwards the translated object. GET and DELETE forward
+	// it as query parameters appended to the target's own. Scheme, host and
+	// path are always the operator's: the caller adds encoded parameters and
+	// nothing else.
+	var (
+		target  = to.TargetURL
+		outBody io.Reader
+	)
+	if query {
+		vals, err := queryValues(tres.Out)
+		if err != nil {
+			fail(http.StatusInternalServerError, "internal", "could not encode translated query")
+			return
+		}
+		if target, err = withQuery(to.TargetURL, vals); errors.Is(err, errQueryClash) {
+			entry.Status = http.StatusBadRequest
+			writeValidationError(w, ValidationErrors{{Field: "query", Message: "contains a parameter that cannot be forwarded"}})
+			return
+		} else if err != nil {
+			fail(http.StatusBadGateway, "bad_target", "invalid destination target_url")
+			return
+		}
+	} else {
+		b, err := json.Marshal(tres.Out)
+		if err != nil {
+			fail(http.StatusInternalServerError, "internal", "could not encode translated payload")
+			return
+		}
+		outBody = bytes.NewReader(b)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), acct.timeout())
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, to.TargetURL, bytes.NewReader(outBody))
+	req, err := http.NewRequestWithContext(ctx, method, target, outBody)
 	if err != nil {
 		fail(http.StatusBadGateway, "bad_target", "invalid destination target_url")
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if outBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("User-Agent", "xlate/"+version)
 	if to.OutboundToken != "" {
 		req.Header.Set("Authorization", "Bearer "+to.OutboundToken)
@@ -392,7 +454,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		entry.Status = http.StatusBadGateway
 		entry.Err = redacted
 		s.auditEmit("account:"+id, "ingest.error", map[string]any{
-			"account": id, "dir": dirStr, "kind": classifyNetErr(err), "err": redacted,
+			"account": id, "dir": dirStr, "method": method, "kind": classifyNetErr(err), "err": redacted,
 		})
 		jsonErrorCode(w, http.StatusBadGateway, "upstream_failed", "upstream request failed")
 		return
@@ -427,7 +489,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 				entry.Err = "strict: response transform refused"
 				entry.Warnings += len(rr.Warnings)
 				s.auditEmit("account:"+id, "ingest.rejected", map[string]any{
-					"account": id, "dir": dirStr, "ip": ip, "reason": "response_transform",
+					"account": id, "dir": dirStr, "method": method, "ip": ip, "reason": "response_transform",
 					"upstream": resp.StatusCode, "fields": boundedPaths(rr.Failed),
 				})
 				jsonErrorCode(w, http.StatusBadGateway, "upstream_invalid", "upstream response could not be converted")
@@ -467,7 +529,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	entry.Status = resp.StatusCode
 	s.auditEmit("account:"+id, "ingest.ok", map[string]any{
-		"account": id, "dir": dirStr, "upstream": resp.StatusCode,
+		"account": id, "dir": dirStr, "method": method, "upstream": resp.StatusCode,
 		"req_bytes": entry.ReqBytes, "resp_bytes": entry.RespBytes,
 		"applied": entry.Applied, "warnings": entry.Warnings,
 	})
@@ -541,6 +603,7 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auditEmit("admin", "account.create", map[string]any{
 		"account": out.ID, "name": out.Name, "enabled": out.Enabled, "map_size": len(out.Map),
+		"a_methods": out.A.methodList(), "b_methods": out.B.methodList(),
 	})
 	writeJSON(w, http.StatusCreated, out)
 }
@@ -593,6 +656,7 @@ func (s *Server) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auditEmit("admin", "account.update", map[string]any{
 		"account": out.ID, "name": out.Name, "enabled": out.Enabled, "map_size": len(out.Map),
+		"a_methods": out.A.methodList(), "b_methods": out.B.methodList(),
 	})
 	writeJSON(w, http.StatusOK, out)
 }

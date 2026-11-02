@@ -157,6 +157,9 @@ func TestAPIErrorEnvelopeIsAlwaysJSON(t *testing.T) {
 	})
 
 	t.Run("wrong method carries Allow", func(t *testing.T) {
+		// Which methods the data plane takes is per account, so the 405 is
+		// answered once the account is known; an unknown one is a 404.
+		mustCreate(t, ts, map[string]any{"id": "x"})
 		for _, tc := range []struct{ method, path, allow string }{
 			{"GET", "/t/x/a2b", "POST"},
 			{"DELETE", "/api/admin/accounts", "GET, POST"},

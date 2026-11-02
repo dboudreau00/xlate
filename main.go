@@ -1,10 +1,11 @@
 // xlate is a bidirectional REST field-translation gateway.
 //
 // Each account pairs two systems (A and B) that speak different field
-// vocabularies. xlate accepts a POST from either side, renames fields
-// according to the account's map, forwards to the opposite side's
-// target URL with that side's credentials, and reverse-maps the JSON
-// response — so both parties only ever see their own field names.
+// vocabularies. xlate accepts a request from either side (a POST unless the
+// account grants that side more methods), renames fields according to the
+// account's map, forwards the same method to the opposite side's target URL
+// with that side's credentials, and reverse-maps the JSON response — so
+// both parties only ever see their own field names.
 package main
 
 import (

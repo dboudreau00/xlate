@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -33,11 +34,16 @@ var errAccountExists = errors.New("account already exists")
 type Endpoint struct {
 	Label     string `json:"label"`
 	TargetURL string `json:"target_url"`
-	// InboundToken is what this side must present when POSTing to xlate.
+	// InboundToken is what this side must present when calling xlate.
 	InboundToken string `json:"inbound_token"`
-	// OutboundToken is what xlate presents (Bearer) when POSTing to
-	// this side's TargetURL.
+	// OutboundToken is what xlate presents (Bearer) when calling this
+	// side's TargetURL.
 	OutboundToken string `json:"outbound_token"`
+	// InboundMethods lists the HTTP methods this side may send to xlate; the
+	// same method is then replayed to the other side. Empty means POST only,
+	// and it is left out of the document then, so existing documents are
+	// unchanged.
+	InboundMethods []string `json:"inbound_methods,omitempty"`
 }
 
 // Account binds two endpoints to a shared bidirectional field map.
@@ -78,6 +84,10 @@ func (a *Account) clone() *Account {
 	// null on the way out.
 	c.Map = make([]FieldPair, len(a.Map))
 	copy(c.Map, a.Map)
+	// The struct copy shares these backing arrays; a clone is handed to
+	// callers and must not alias the stored account.
+	c.A.InboundMethods = slices.Clone(a.A.InboundMethods)
+	c.B.InboundMethods = slices.Clone(a.B.InboundMethods)
 	return &c
 }
 
@@ -330,6 +340,8 @@ func (s *Store) Update(input *accountInput) (*Account, error) {
 	in := input.resolve(cur, false)
 	mergeTokens(&in.A, cur.A)
 	mergeTokens(&in.B, cur.B)
+	keepMethods(&in.A, cur.A)
+	keepMethods(&in.B, cur.B)
 	applyDefaults(in)
 	if err := validateAccount(in); err != nil {
 		return nil, err
@@ -424,6 +436,8 @@ func applyDefaults(a *Account) {
 	if a.B.Label == "" {
 		a.B.Label = "System B"
 	}
+	a.A.InboundMethods = normMethods(a.A.InboundMethods)
+	a.B.InboundMethods = normMethods(a.B.InboundMethods)
 	if a.A.InboundToken == "" {
 		a.A.InboundToken = newToken()
 	}
