@@ -444,7 +444,7 @@ Before you point anything real at this:
 - **Enable alerts**: `-alert-webhook` plus `-alert-secret`. An unsigned webhook is spoofable, which defeats the point of a security signal.
 - **Ship the audit trail off-host.** It's line-oriented JSONL, so any log shipper works. Tamper-evidence catches edits and truncation, but an attacker with write access and the source can rebuild the chain; comparing tails off-host is what makes it strong.
 - **Only turn on `-trust-proxy` if a proxy in front strips client-supplied `X-Forwarded-For`.** That value feeds tripwire forensics, and it's attacker-controlled otherwise.
-- **Cap concurrency around 32 in-flight requests per instance** and put a rate limiter in front. Throughput peaks there (~3 500 req/s on an i9; see *Performance* in the README) and degrades beyond it. The tripwire is an anomaly detector, not a rate limiter, and every refused request still costs an audit fsync (concurrent requests share one; see *Performance* in the README).
+- **Cap concurrency around 32 in-flight requests per instance** and put a rate limiter in front. A partner that should be held to a quota gets `"rate_limit_per_min"` on its account. Throughput peaks there (~3 500 req/s on an i9; see *Performance* in the README) and degrades beyond it. The tripwire is an anomaly detector, not a rate limiter, and every refused request still costs an audit fsync (concurrent requests share one; see *Performance* in the README).
 - **Target URLs are unrestricted by design**, so admin access implies SSRF reach. Egress-filter if untrusted people can reach the control plane.
 
 Clean up the demo:

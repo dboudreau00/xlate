@@ -26,6 +26,9 @@ type LogEntry struct {
 	// unauthenticated 404 probe is attacker-chosen, and creating a
 	// counter row per unique probe would grow memory without bound.
 	AccountKnown bool `json:"-"`
+	// RateLimited marks a 429 that came from the per-account rate limit
+	// rather than the tripwire, so the counters can tell the two apart.
+	RateLimited bool `json:"-"`
 	// Fields carries "path:type" entries when the account is inside a
 	// discovery window. Shape only — never a value — and only ever in
 	// this in-memory ring, never on the durable audit trail.

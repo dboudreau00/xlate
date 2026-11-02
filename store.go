@@ -55,6 +55,9 @@ type Account struct {
 	// value unconverted. Off keeps the fail-open rule. Left out of the
 	// document when off, so existing documents are unchanged.
 	StrictTransforms bool `json:"strict_transforms,omitempty"`
+	// RateLimitPerMin caps how many requests each side may send per minute;
+	// zero is no limit. Left out of the document when off.
+	RateLimitPerMin int `json:"rate_limit_per_min,omitempty"`
 	// DiscoverUntil time-boxes field discovery. While it is in the
 	// future, the shape of inbound payloads (paths and types, never
 	// values) is recorded so an operator can wire a map from what a
@@ -85,10 +88,11 @@ func (a *Account) clone() *Account {
 type accountInput struct {
 	Account
 	Enabled *bool `json:"enabled"`
-	// A pointer for the same reason: a PUT from a client that predates the
+	// Pointers for the same reason: a PUT from a client that predates a
 	// setting must not quietly turn a fail-closed account back into a
-	// fail-open one.
+	// fail-open one, or lift a rate limit.
 	StrictTransforms *bool `json:"strict_transforms"`
+	RateLimitPerMin  *int  `json:"rate_limit_per_min"`
 }
 
 // resolve folds the input onto the stored document. On create an
@@ -110,6 +114,12 @@ func (in *accountInput) resolve(current *Account, creating bool) *Account {
 		a.StrictTransforms = *in.StrictTransforms
 	case current != nil:
 		a.StrictTransforms = current.StrictTransforms
+	}
+	switch {
+	case in.RateLimitPerMin != nil:
+		a.RateLimitPerMin = *in.RateLimitPerMin
+	case current != nil:
+		a.RateLimitPerMin = current.RateLimitPerMin
 	}
 	return &a
 }

@@ -24,6 +24,7 @@ type Server struct {
 	logs       *Ring
 	audit      *AuditLog
 	trip       *Tripwire
+	limiter    *RateLimiter
 	alerter    *Alerter
 	schemas    *SchemaStore
 	stats      *Stats
@@ -59,6 +60,7 @@ func NewServer(store *Store, logs *Ring, adminToken string, maxBody int64, admin
 	return &Server{
 		store:      store,
 		logs:       logs,
+		limiter:    NewRateLimiter(),
 		schemas:    NewSchemaStore(),
 		stats:      NewStats(),
 		adminToken: adminToken,
@@ -269,6 +271,26 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		s.auditEmit("account:"+id, "ingest.denied", map[string]any{
 			"account": id, "dir": dirStr, "ip": ip, "reason": "disabled",
 		})
+		return
+	}
+	// The rate limit comes after authentication on purpose: account ids are
+	// not secrets, so metering anonymous traffic would let anyone who has
+	// read one spend the partner's allowance. Floods without credentials are
+	// the tripwire's business. It also comes before the body is read, so a
+	// refused request costs almost nothing.
+	if refusal := s.limiter.Allow(id, dir, acct.RateLimitPerMin); refusal != nil {
+		secs := int(refusal.RetryAfter.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		entry.Status = http.StatusTooManyRequests
+		entry.Err = "rate limited"
+		entry.RateLimited = true
+		if refusal.Report {
+			s.auditEmit("account:"+id, "ingest.limited", map[string]any{
+				"account": id, "dir": dirStr, "ip": ip,
+				"limit_per_min": acct.RateLimitPerMin, "refused": refusal.Suppressed,
+			})
+		}
+		jsonErrorCode(w, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded")
 		return
 	}
 	// Correlation headers are forwarded verbatim to the destination and
@@ -582,6 +604,7 @@ func (s *Server) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.trip.Reset(id)
+	s.limiter.Forget(id)
 	s.schemas.Forget(id)
 	s.stats.Forget(id)
 	s.auditEmit("admin", "account.delete", map[string]any{"account": id})

@@ -29,6 +29,7 @@ type Stats struct {
 	c5xx     uint64
 	denied   uint64 // 401
 	blocked  uint64 // 429 (tripwire)
+	limited  uint64 // 429 (rate limit)
 	upstream uint64 // 502 and friends
 
 	reqBytes  uint64
@@ -48,6 +49,7 @@ type accountStat struct {
 	OK        uint64 `json:"ok"`
 	Denied    uint64 `json:"denied"`
 	Blocked   uint64 `json:"blocked"`
+	Limited   uint64 `json:"limited"`
 	Failed    uint64 `json:"failed"`
 	ReqBytes  uint64 `json:"req_bytes"`
 	RespBytes uint64 `json:"resp_bytes"`
@@ -87,6 +89,7 @@ type StatsSnapshot struct {
 	ServerErr  uint64           `json:"server_err"`
 	Denied     uint64           `json:"denied"`
 	Blocked    uint64           `json:"blocked"`
+	Limited    uint64           `json:"limited"`
 	Upstream   uint64           `json:"upstream_err"`
 	SuccessPct float64          `json:"success_pct"`
 	ReqBytes   uint64           `json:"req_bytes"`
@@ -144,6 +147,8 @@ func (s *Stats) Record(e LogEntry) {
 	switch {
 	case e.Status == 401 && gatewayOwn:
 		s.denied++
+	case e.Status == 429 && gatewayOwn && e.RateLimited:
+		s.limited++
 	case e.Status == 429 && gatewayOwn:
 		s.blocked++
 	case e.Status == 502:
@@ -170,6 +175,8 @@ func (s *Stats) Record(e LogEntry) {
 			as.OK++
 		case e.Status == 401 && gatewayOwn:
 			as.Denied++
+		case e.Status == 429 && gatewayOwn && e.RateLimited:
+			as.Limited++
 		case e.Status == 429 && gatewayOwn:
 			as.Blocked++
 		default:
@@ -216,7 +223,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	out.UptimeSec = int(uptime.Seconds())
 	out.Total, out.OK = s.total, s.c2xx
 	out.ClientErr, out.ServerErr = s.c4xx, s.c5xx
-	out.Denied, out.Blocked, out.Upstream = s.denied, s.blocked, s.upstream
+	out.Denied, out.Blocked, out.Limited, out.Upstream = s.denied, s.blocked, s.limited, s.upstream
 	out.ReqBytes, out.RespBytes = s.reqBytes, s.respBytes
 	out.Applied, out.Warnings = s.applied, s.warnings
 	out.MaxMs = s.latMaxMs

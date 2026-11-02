@@ -78,6 +78,15 @@ func BenchmarkTripwireGate(b *testing.B) {
 	}
 }
 
+func BenchmarkRateLimiterAllow(b *testing.B) {
+	l := NewRateLimiter()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l.Allow("acct", AtoB, 1_000_000)
+	}
+}
+
 func BenchmarkTripwireRecordDenied(b *testing.B) {
 	tw := NewTripwire(5, 5*time.Minute, 15*time.Minute, "alert")
 	b.ReportAllocs()

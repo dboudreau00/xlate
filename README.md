@@ -159,7 +159,7 @@ Flags are validated at startup, so a typo fails fast instead of producing a quie
 
 `POST /t/{account_id}/{a2b|b2a}` with `Authorization: Bearer <side's inbound_token>` (or `X-Api-Key`) and a JSON **object** body.
 
-Pipeline: tripwire gate → authenticate → validate → translate request → POST to destination `target_url` with its `outbound_token` → translate JSON object responses back → relay upstream status and body. `Idempotency-Key` and `X-Request-Id` pass through. Redirects are returned, never followed. `X-Xlate-Applied` / `X-Xlate-Warnings` headers carry translation counts for **both** legs.
+Pipeline: tripwire gate → authenticate → rate limit → validate → translate request → POST to destination `target_url` with its `outbound_token` → translate JSON object responses back → relay upstream status and body. `Idempotency-Key` and `X-Request-Id` pass through. Redirects are returned, never followed. `X-Xlate-Applied` / `X-Xlate-Warnings` headers carry translation counts for **both** legs.
 
 The body must be exactly one JSON object — trailing bytes after it are refused rather than silently dropped, so xlate and the destination can never read the same request two different ways. Correlation headers are checked for length and header-safety before they are forwarded.
 
@@ -177,10 +177,22 @@ Errors are a stable envelope: `{"error": "<human>", "code": "<machine>"}`.
 | `413` | `payload_too_large` | body exceeds `-max-body` |
 | `422` | `transform_failed` | [strict transforms](#strict-transforms): a value could not be converted, nothing was forwarded |
 | `429` | `account_locked` | tripwire lockout; `Retry-After` says when to return |
+| `429` | `rate_limited` | that side's [rate limit](#rate-limits) is spent; `Retry-After` says when to return |
 | `502` | `no_target` / `upstream_failed` / `upstream_read` / `upstream_oversize` / `bad_target` / `upstream_invalid` | destination problems (detail in logs only); `upstream_invalid` is a response refused by strict transforms |
 | `500` | `internal` | encode failure or recovered panic |
 
 Every route answers with this envelope, including unknown paths and wrong methods.
+
+### Rate limits
+
+Set `"rate_limit_per_min": 600` on an account (the console's **Rate limit** field) to cap how fast each side may send. `0` or omitted means no limit, and the ceiling is 1 000 000. It is a token bucket: an idle side may burst up to one minute's allowance, then is held to the limit as tokens refill continuously (600 a minute is 10 a second). Past it, a request is refused with `429` and code `rate_limited`, `Retry-After` says how long until the next one would pass, and nothing is read or forwarded.
+
+- **Per side.** Side A and side B each have their own bucket, so one party flooding cannot use up the other's callbacks.
+- **After authentication.** Only a caller holding the side's inbound token spends its allowance. Account ids are not secrets, so metering anonymous traffic would let anyone who had read one starve the partner. Credential guessing is the tripwire's job, and a limiter in front of xlate is still the right answer to a flood (see [Performance](#performance)).
+- **Not an alarm.** Rate-limited requests do not feed the tripwire. They are written to the trail as `ingest.limited`, at most one record per side every 10 seconds with a count of the refusals it stands for, and the console counts them under Refused.
+- **In memory, per instance.** Buckets start full after a restart or a change of the limit, and two instances behind one balancer each enforce the limit on their own.
+
+A `PUT` that omits `rate_limit_per_min` keeps the stored value; send `0` to remove the limit.
 
 ## Mapping semantics
 
@@ -267,6 +279,7 @@ $ curl -sX POST localhost:8080/api/admin/accounts -H "Authorization: Bearer $TOK
 | `*.inbound_token` / `*.outbound_token` | 16–512 chars, printable non-space ASCII (they are written into an `Authorization` header) |
 | `timeout_sec` | 1–300; `0`/omitted takes the default of 15. Out of range is refused, not clamped |
 | `strict_transforms` | boolean, off by default; omitted on `PUT` keeps the stored value |
+| `rate_limit_per_min` | integer 0–1 000 000; `0`/omitted means no limit; omitted on `PUT` keeps the stored value |
 | `map` | ≤ 500 pairs; both sides required per row; no duplicate or parent/child paths per side |
 | `map[].{a,b}` | ≤ 256 chars, ≤ 16 segments, no empty segment, no leading/trailing dot, no array indexing |
 | `map[].transform` | `kind` must be `date`; both formats must be a known name, an epoch, or a round-tripping Go layout |
@@ -301,7 +314,7 @@ The `no_target` check runs *after* decoding so an unwired account still yields i
 
 ## Dashboard
 
-`GET /api/admin/stats`, and the console's landing tab. Lifetime counters for the node — total requests, delivered, refused (split into unauthorised and locked out), upstream failures, fields translated, warnings, bytes relayed, average and peak latency, uptime — plus a per-account rollup and a rolling per-minute series for the last hour.
+`GET /api/admin/stats`, and the console's landing tab. Lifetime counters for the node — total requests, delivered, refused (split into unauthorised, locked out and rate limited), upstream failures, fields translated, warnings, bytes relayed, average and peak latency, uptime — plus a per-account rollup and a rolling per-minute series for the last hour.
 
 The activity ring answers *what just happened* and holds only the last `-log-size` requests. These counters answer *what has this node done*, which the ring cannot: it forgets. They are in-memory and reset on restart, deliberately — durable metrics belong in whatever scrapes the node, not in a gateway trying to stay a single dependency-free binary. Counters only: no payloads, no identifiers.
 
@@ -316,7 +329,7 @@ xlate -verify-audit /var/log/xlate/trail.jsonl
 
 Restarts extend the chain (the tail is recovered on open), so one file spans process lifetimes. Security-relevant events (`tripwire.*`, `account.*`, `alert.*`, `server.*`, denials) are on disk (fsynced) before the request moves on, and concurrent ones share an fsync; routine `ingest.ok` records are written without one and rely on the OS.
 
-Events: `server.start/stop/panic`, `account.create/update/delete/rotate/frozen/rejected`, `ingest.ok/denied/blocked/error/rejected`, `tripwire.trip/reset`, `alert.sent/failed`. Ingest records carry metadata only (account, direction, ip, sizes, applied/warning counts, upstream status). **Bodies are never captured** — this traffic routinely carries payment identifiers and PII — and **token values never appear**; rotation logs the slot, not the secret.
+Events: `server.start/stop/panic`, `account.create/update/delete/rotate/frozen/rejected`, `ingest.ok/denied/blocked/error/rejected/limited`, `tripwire.trip/reset`, `alert.sent/failed`. Ingest records carry metadata only (account, direction, ip, sizes, applied/warning counts, upstream status). **Bodies are never captured** — this traffic routinely carries payment identifiers and PII — and **token values never appear**; rotation logs the slot, not the secret.
 
 `account.rejected` records a refused admin mutation: method, path, ip, a `reason` (`unknown_field` / `invalid_field` / `bad_request`) and the offending field **names**. Never values — an unknown field is very often a typo'd credential field with a live credential in it (`inbound_tokenn`), and that is exactly what must not reach a log. Names are stripped of control characters and length-bounded so a client-chosen key cannot forge a log line.
 
@@ -362,6 +375,7 @@ Translation itself is not the cost. The engine is roughly a microsecond:
 | JSON decode of a typical payload | 3.8 µs |
 | Token comparison (constant-time) | 0.25 µs |
 | Tripwire gate / record | 14 ns / 80 ns |
+| Rate-limit check (accounts with a limit only) | 47 ns |
 | Audit write, buffered (`ingest.ok`) | 30 µs |
 | **Audit write, fsynced (denials, `account.*`)** | **1.4 ms** |
 | Audit write, fsynced, 16 concurrent callers sharing fsyncs | 0.16 ms each |
@@ -369,7 +383,7 @@ Translation itself is not the cost. The engine is roughly a microsecond:
 Two consequences worth knowing before you deploy:
 
 - **A successful request is dominated by the outbound call**, not by xlate. Your real ceiling is the destination's latency and connection pool, and the per-account `timeout_sec` bounds how long a slow destination can tie up a request.
-- **Refused requests cost an fsync, shared between concurrent callers.** `ingest.denied` and `ingest.blocked` are security-relevant, so each record is on disk before the request moves on, and a caller on its own still waits out a whole fsync (about 1.4 ms). Concurrent callers share: while an fsync runs the others write their records, and the next fsync makes all of them durable at once. Routine records such as `ingest.ok` no longer queue behind it. On this machine 16 concurrent refused requests went from about 750 to about 4 000 req/s (`BenchmarkIngestRejected` at 16 CPUs); on Linux, in a container on WSL2, the fsynced audit write at 16 callers fell from 1.6 ms to 0.2 ms. A tripwire lockout does not relieve the cost: it converts fsynced 401s into fsynced 429s. For credential-guessing floods at volume, put a rate limiter in front (the tripwire is an anomaly detector, not a limiter), or move the trail to faster storage.
+- **Refused requests cost an fsync, shared between concurrent callers.** `ingest.denied` and `ingest.blocked` are security-relevant, so each record is on disk before the request moves on, and a caller on its own still waits out a whole fsync (about 1.4 ms). Concurrent callers share: while an fsync runs the others write their records, and the next fsync makes all of them durable at once. Routine records such as `ingest.ok` no longer queue behind it. On this machine 16 concurrent refused requests went from about 750 to about 4 000 req/s (`BenchmarkIngestRejected` at 16 CPUs); on Linux, in a container on WSL2, the fsynced audit write at 16 callers fell from 1.6 ms to 0.2 ms. A tripwire lockout does not relieve the cost: it converts fsynced 401s into fsynced 429s. For credential-guessing floods at volume, put a rate limiter in front (the tripwire is an anomaly detector, not a limiter), or move the trail to faster storage. The per-account [rate limit](#rate-limits) meters authenticated callers only, so it does not help there.
 
 ## Security posture (0.3)
 
@@ -418,7 +432,7 @@ A corrupt or truncated state file stops the process at startup rather than quiet
 
 ## Deliberately out of scope for 0.3
 
-Enum/type value transforms, array path addressing, non-POST methods, retries/DLQ for failed forwards, HMAC signing of *data-plane* requests, per-account rate limits (tripwire is an anomaly response, not a limiter), multi-user admin (OIDC), SQLite backend, off-host audit shipping.
+Enum/type value transforms, array path addressing, non-POST methods, retries/DLQ for failed forwards, HMAC signing of *data-plane* requests, multi-user admin (OIDC), SQLite backend, off-host audit shipping.
 
 ## Layout
 

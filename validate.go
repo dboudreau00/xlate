@@ -28,6 +28,7 @@ const (
 	maxPathDepth      = 16
 	maxFormatLen      = 128
 	maxCorrelationLen = 256
+	maxRatePerMin     = 1_000_000
 	maxAdminBody      = 1 << 20
 )
 
@@ -426,6 +427,9 @@ func validateAccountDoc(a *Account) ValidationErrors {
 	if a.TimeoutSec < 0 || a.TimeoutSec > maxTimeoutSec {
 		ve.add("timeout_sec", "must be between 1 and %d seconds (0 selects the default of %d)",
 			maxTimeoutSec, defaultTimeoutSec)
+	}
+	if a.RateLimitPerMin < 0 || a.RateLimitPerMin > maxRatePerMin {
+		ve.add("rate_limit_per_min", "must be between 0 and %d requests per minute (0 means no limit)", maxRatePerMin)
 	}
 	// A discovery window that never closes is a privacy leak nobody
 	// remembers to turn off, so the far end is bounded.

@@ -582,6 +582,10 @@
           <label class="f" for="ed-timeout" style="margin-top:0">Upstream timeout (seconds)</label>
           <input type="number" id="ed-timeout" min="1" max="300" style="width:110px">
         </div>
+        <div>
+          <label class="f" for="ed-rate" style="margin-top:0">Rate limit (requests per minute, 0 for none)</label>
+          <input type="number" id="ed-rate" min="0" max="1000000" style="width:110px">
+        </div>
       </div>
     </div>
 
@@ -851,7 +855,7 @@ async function openEditor(id) {
     S.E = { id: "", name: "", enabled: true,
       a: { label: "System A", target_url: "", inbound_token: "", outbound_token: "" },
       b: { label: "System B", target_url: "", inbound_token: "", outbound_token: "" },
-      map: [{ a: "", b: "" }], drop_unmapped: false, strict_transforms: false, timeout_sec: 15 };
+      map: [{ a: "", b: "" }], drop_unmapped: false, strict_transforms: false, rate_limit_per_min: 0, timeout_sec: 15 };
     S.createMode = true;
   }
   renderEditor();
@@ -875,6 +879,7 @@ function renderEditor() {
   $("ed-drop").checked = !!E.drop_unmapped;
   $("ed-strict").checked = !!E.strict_transforms;
   $("ed-timeout").value = E.timeout_sec || 15;
+  $("ed-rate").value = E.rate_limit_per_min || 0;
   $("btn-delete").classList.toggle("hidden", create);
   $("ed-tools").classList.toggle("hidden", create);
   document.querySelectorAll("[data-rotate]").forEach(b => b.disabled = create);
@@ -1053,6 +1058,7 @@ function collect() {
   E.drop_unmapped = $("ed-drop").checked;
   E.strict_transforms = $("ed-strict").checked;
   E.timeout_sec = parseInt($("ed-timeout").value, 10) || 15;
+  E.rate_limit_per_min = parseInt($("ed-rate").value, 10) || 0;
   // Inbound tokens: blank means "keep stored" server-side; send what we
   // hold. Outbound tokens are editable here, so the console always
   // expresses explicit state: an emptied field is sent as the "none"
@@ -1566,10 +1572,11 @@ $("tp-bars").addEventListener("mouseleave", () => { S.dash.chartHover = null; ap
 
 /* ---- vitals + rollup ---- */
 function renderVitals(d) {
-  const s = d.stats, refused = (s.denied || 0) + (s.blocked || 0);
+  const s = d.stats, refused = (s.denied || 0) + (s.blocked || 0) + (s.limited || 0);
   const rows = [
     ["Refused", fmtCount(refused), refused ? "bad" : "",
-      (s.denied || 0) + " unauthorised · " + (s.blocked || 0) + " locked out"],
+      (s.denied || 0) + " unauthorised · " + (s.blocked || 0) + " locked out" +
+      (s.limited ? " · " + s.limited + " rate limited" : "")],
     ["Upstream failures", fmtCount(s.server_err), s.server_err ? "bad" : "",
       (s.upstream_err ? fmtCount(s.upstream_err) + " " : "") + "could not be delivered"],
     ["Translation warnings", fmtCount(s.warnings), s.warnings ? "warn" : "", "collisions or unconverted values"],
@@ -1590,7 +1597,7 @@ function pairGlyph(a, muted) {
     `<span class="pb">${esc(a.b.label)}</span></span>`;
 }
 function rollRow(id, who, st, open) {
-  const refused = (st.denied || 0) + (st.blocked || 0), failed = st.failed || 0, warn = st.warnings || 0;
+  const refused = (st.denied || 0) + (st.blocked || 0) + (st.limited || 0), failed = st.failed || 0, warn = st.warnings || 0;
   return `<tr${open ? ` tabindex="0" data-id="${esc(id)}"` : ""}>` +
     `<td><div class="rid"><span class="rid-id">${esc(id)}</span>${who}</div></td>` +
     `<td>${fmtCount(st.total)}</td>` +
