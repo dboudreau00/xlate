@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,6 +49,53 @@ func TestStatsCountsByOutcome(t *testing.T) {
 	}
 	if want := 40.0; got.SuccessPct != want {
 		t.Errorf("success pct: want %.1f, got %.1f", want, got.SuccessPct)
+	}
+}
+
+// The dashboard draws traffic each way along a lane, so the counters must
+// say which way it went. A refused request still knocked on one side's
+// door, so it counts in that direction too.
+func TestStatsCountsByDirection(t *testing.T) {
+	s := NewStats()
+	now := time.Now()
+	for _, e := range []LogEntry{
+		{Account: "acme", AccountKnown: true, Direction: "a2b", Status: 200, Time: now},
+		{Account: "acme", AccountKnown: true, Direction: "a2b", Status: 200, Time: now},
+		{Account: "acme", AccountKnown: true, Direction: "a2b", Status: 502, Time: now},
+		{Account: "acme", AccountKnown: true, Direction: "b2a", Status: 200, Time: now},
+		{Account: "acme", AccountKnown: true, Direction: "b2a", Status: 401, Time: now},
+		{Account: "solo", AccountKnown: true, Direction: "a2b", Status: 200, Time: now},
+		// An unknown id counts toward the node, never a row; tripwire
+		// bookkeeping is not a request at all.
+		{Account: "probe", Direction: "b2a", Status: 404, Time: now},
+		{Account: "acme", AccountKnown: true, Direction: "trip", Status: 429, Time: now},
+	} {
+		s.Record(e)
+	}
+	got := s.Snapshot()
+
+	if got.A2B != 4 || got.B2A != 3 {
+		t.Errorf("node split: want a2b=4 b2a=3, got a2b=%d b2a=%d", got.A2B, got.B2A)
+	}
+	if got.A2B+got.B2A != got.Total {
+		t.Errorf("directions must add up to the total: %d + %d != %d", got.A2B, got.B2A, got.Total)
+	}
+
+	rows := map[string]AccountStatRow{}
+	for _, r := range got.Accounts {
+		rows[r.Account] = r
+		if r.A2B+r.B2A != r.Total {
+			t.Errorf("%s: directions %d + %d != total %d", r.Account, r.A2B, r.B2A, r.Total)
+		}
+	}
+	if r := rows["acme"]; r.A2B != 3 || r.B2A != 2 {
+		t.Errorf("acme: want a2b=3 b2a=2, got a2b=%d b2a=%d", r.A2B, r.B2A)
+	}
+	if r := rows["solo"]; r.A2B != 1 || r.B2A != 0 {
+		t.Errorf("solo: want a2b=1 b2a=0, got a2b=%d b2a=%d", r.A2B, r.B2A)
+	}
+	if _, ok := rows["probe"]; ok {
+		t.Error("an unknown id created a row")
 	}
 }
 
@@ -164,16 +212,21 @@ func TestStatsConcurrentRecord(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			dir := []string{"a2b", "b2a"}[i%2]
 			for j := 0; j < 20; j++ {
 				s.Record(LogEntry{Account: fmt.Sprintf("acct-%d", i%5),
-					Direction: "a2b", Status: 200, Applied: 1, LatencyMs: 1, Time: time.Now()})
+					Direction: dir, Status: 200, Applied: 1, LatencyMs: 1, Time: time.Now()})
 			}
 			s.Snapshot()
 		}(i)
 	}
 	wg.Wait()
-	if got := s.Snapshot().Total; got != 1000 {
-		t.Errorf("want 1000, got %d", got)
+	got := s.Snapshot()
+	if got.Total != 1000 {
+		t.Errorf("want 1000, got %d", got.Total)
+	}
+	if got.A2B != 500 || got.B2A != 500 {
+		t.Errorf("want 500 each way, got a2b=%d b2a=%d", got.A2B, got.B2A)
 	}
 }
 
@@ -246,6 +299,78 @@ func TestStatsEndpoint(t *testing.T) {
 			t.Errorf("deleted account still on the dashboard: %v", rows)
 		}
 	})
+}
+
+// Both routes of one account, through the HTTP surface the dashboard
+// calls: each request lands in its own direction's counter, and a refused
+// one counts in the direction it was aimed at.
+func TestStatsEndpointSplitsByDirection(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"y":1}`)
+	}))
+	defer up.Close()
+
+	ts := newAPI(t)
+	acct := mustCreate(t, ts, map[string]any{"id": "twoway", "enabled": true,
+		"a":   map[string]any{"target_url": up.URL},
+		"b":   map[string]any{"target_url": up.URL},
+		"map": []map[string]any{{"a": "x", "b": "y"}}})
+
+	for i := 0; i < 3; i++ {
+		call(t, ts, "POST", "/t/twoway/a2b", sideToken(acct, "a"), map[string]any{"x": i})
+	}
+	call(t, ts, "POST", "/t/twoway/b2a", sideToken(acct, "b"), map[string]any{"y": 1})
+	call(t, ts, "POST", "/t/twoway/b2a", "wrong", map[string]any{"y": 1})
+
+	st, _ := admin(t, ts, "GET", "/api/admin/stats", nil).json(t)["stats"].(map[string]any)
+	if fmt.Sprint(st["a2b"]) != "3" || fmt.Sprint(st["b2a"]) != "2" {
+		t.Errorf("node: want a2b=3 b2a=2, got a2b=%v b2a=%v", st["a2b"], st["b2a"])
+	}
+	rows, _ := st["accounts"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("want one account row, got %v", rows)
+	}
+	row, _ := rows[0].(map[string]any)
+	if fmt.Sprint(row["a2b"]) != "3" || fmt.Sprint(row["b2a"]) != "2" || fmt.Sprint(row["total"]) != "5" {
+		t.Errorf("row: want a2b=3 b2a=2 total=5, got %v", row)
+	}
+}
+
+// Scripts read /api/admin/stats, so the direction counters are additions:
+// every field that was there before must still be, under the same name.
+func TestStatsJSONKeepsExistingFields(t *testing.T) {
+	s := NewStats()
+	s.Record(LogEntry{Account: "a", AccountKnown: true, Direction: "b2a", Status: 200, Time: time.Now()})
+	raw, err := json.Marshal(s.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap map[string]any
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"uptime_sec", "total", "ok", "client_err", "server_err", "denied", "blocked",
+		"limited", "upstream_err", "success_pct", "req_bytes", "resp_bytes", "applied", "warnings",
+		"avg_ms", "max_ms", "per_min", "series", "accounts", "a2b", "b2a"} {
+		if _, ok := snap[k]; !ok {
+			t.Errorf("stats field %q is missing", k)
+		}
+	}
+	rows, _ := snap["accounts"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("want one account row, got %v", rows)
+	}
+	row, _ := rows[0].(map[string]any)
+	for _, k := range []string{"account", "total", "ok", "denied", "blocked", "limited", "failed",
+		"req_bytes", "resp_bytes", "applied", "warnings", "avg_ms", "last_seen", "a2b", "b2a"} {
+		if _, ok := row[k]; !ok {
+			t.Errorf("account row field %q is missing", k)
+		}
+	}
+	if row["a2b"] != float64(0) || row["b2a"] != float64(1) {
+		t.Errorf("account row: want a2b=0 b2a=1, got a2b=%v b2a=%v", row["a2b"], row["b2a"])
+	}
 }
 
 // Unauthenticated probes of nonexistent account ids must not create

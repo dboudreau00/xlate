@@ -24,6 +24,8 @@ type Stats struct {
 	startedAt time.Time
 
 	total    uint64
+	a2b      uint64 // requests from side A to side B
+	b2a      uint64 // requests from side B to side A
 	c2xx     uint64
 	c4xx     uint64
 	c5xx     uint64
@@ -46,6 +48,8 @@ type Stats struct {
 
 type accountStat struct {
 	Total     uint64 `json:"total"`
+	A2B       uint64 `json:"a2b"`
+	B2A       uint64 `json:"b2a"`
 	OK        uint64 `json:"ok"`
 	Denied    uint64 `json:"denied"`
 	Blocked   uint64 `json:"blocked"`
@@ -84,6 +88,8 @@ type AccountStatRow struct {
 type StatsSnapshot struct {
 	UptimeSec  int              `json:"uptime_sec"`
 	Total      uint64           `json:"total"`
+	A2B        uint64           `json:"a2b"`
+	B2A        uint64           `json:"b2a"`
 	OK         uint64           `json:"ok"`
 	ClientErr  uint64           `json:"client_err"`
 	ServerErr  uint64           `json:"server_err"`
@@ -118,6 +124,13 @@ func (s *Stats) Record(e LogEntry) {
 	defer s.mu.Unlock()
 
 	s.total++
+	// The guard above leaves only the two data-plane directions.
+	toB := e.Direction == "a2b"
+	if toB {
+		s.a2b++
+	} else {
+		s.b2a++
+	}
 	s.reqBytes += uint64(e.ReqBytes)
 	s.respBytes += uint64(e.RespBytes)
 	s.applied += uint64(e.Applied)
@@ -164,6 +177,11 @@ func (s *Stats) Record(e LogEntry) {
 			s.accounts[e.Account] = as
 		}
 		as.Total++
+		if toB {
+			as.A2B++
+		} else {
+			as.B2A++
+		}
 		as.ReqBytes += uint64(e.ReqBytes)
 		as.RespBytes += uint64(e.RespBytes)
 		as.Applied += uint64(e.Applied)
@@ -222,6 +240,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	uptime := time.Since(s.startedAt)
 	out.UptimeSec = int(uptime.Seconds())
 	out.Total, out.OK = s.total, s.c2xx
+	out.A2B, out.B2A = s.a2b, s.b2a
 	out.ClientErr, out.ServerErr = s.c4xx, s.c5xx
 	out.Denied, out.Blocked, out.Limited, out.Upstream = s.denied, s.blocked, s.limited, s.upstream
 	out.ReqBytes, out.RespBytes = s.reqBytes, s.respBytes

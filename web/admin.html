@@ -93,6 +93,8 @@
   .topo-legend li{display:flex;align-items:center;gap:6px}
   .lg-dot{width:8px;height:8px;border-radius:50%}
   .lg-dash{width:16px;height:0;border-top:1px dashed}
+  .lg-dir{font:600 12px/16px var(--mono);color:var(--txt)}
+  .lg-n{font-weight:500;font-variant-numeric:tabular-nums;color:var(--txt)}
   .topo-grid{display:grid;grid-template-columns:minmax(0,120px) 1fr minmax(0,120px);padding:16px 16px 24px}
   .topo-cap{margin:0;padding-bottom:12px;font:11px/1.5 var(--mono);color:var(--dim);text-align:center}
   .topo-cap.a{color:var(--sideA);text-align:left} .topo-cap.b{color:var(--sideB);text-align:right}
@@ -101,6 +103,7 @@
   .topo-none{margin:0;font-size:12px;color:var(--faint)}
   @media (min-width:640px){ .topo-grid{grid-template-columns:minmax(0,200px) 1fr minmax(0,200px);padding:16px 24px 24px} }
   @media (min-width:1024px){ .topo-grid{grid-template-columns:220px 1fr 220px} }
+  @media (max-width:639px){ .dir-tag{display:none} }
 
   .lane-node{position:relative;display:flex;align-items:center;gap:12px;width:100%;height:64px;padding:0 12px;
     border:1px solid var(--line);border-radius:12px;background:var(--panel);color:inherit;font:inherit;
@@ -131,11 +134,16 @@
   .wire .dash{stroke-dasharray:4 5}
   .wire.hot path{stroke-width:2.5;stroke-opacity:1}
   .wire.hot path.flow{stroke-dasharray:4 6;animation:wire-flow .8s linear infinite}
+  .wire.hot path.flow.rev{animation-direction:reverse}
   @keyframes wire-flow{to{stroke-dashoffset:-20}}
   .dot-a{fill:var(--sideA)} .dot-b{fill:var(--sideB)} .dot-bad{fill:var(--err)}
   .lock-tag{position:absolute;transform:translate(-50%,-50%);white-space:nowrap;border:1px solid rgb(var(--err-rgb) / .3);
     border-radius:6px;background:var(--panel);padding:2px 6px;font:500 10px/1.5 var(--mono);color:var(--err);transition:opacity .2s ease-out}
   .lock-tag.dim{opacity:.25}
+  .dir-tag{position:absolute;z-index:2;transform:translate(-50%,-50%);white-space:pre;pointer-events:none;opacity:0;
+    border:1px solid var(--line2);border-radius:6px;background:var(--panel);padding:2px 6px;
+    font:500 10px/1.5 var(--mono);color:var(--dim);transition:opacity .2s ease-out}
+  .dir-tag.hot{opacity:1}
 
   .hub{position:absolute;display:flex;flex-direction:column;border-radius:16px;background:var(--core);color:var(--core-ink);
     padding:16px;box-shadow:0 12px 32px -12px rgba(0,0,0,.45)}
@@ -419,19 +427,21 @@
       <div class="topo-head">
         <div>
           <h2 class="ptitle" id="topo-title">Integration topology</h2>
-          <p class="pdesc">Each request enters in one vocabulary and leaves in the other. Select a lane to open it.</p>
+          <p class="pdesc">Each request enters in one vocabulary and leaves in the other, whichever side sends it. Select a lane to open it.</p>
         </div>
         <ul class="topo-legend">
           <li><span class="lg-dot" style="background:var(--sideA)"></span>Side A vocabulary</li>
           <li><span class="lg-dot" style="background:var(--sideB)"></span>Side B vocabulary</li>
+          <li title="Requests from side A to side B since start"><span class="lg-dir">→</span>A to B <span class="lg-n" id="lg-a2b">0</span></li>
+          <li title="Requests from side B to side A since start"><span class="lg-dir">←</span>B to A <span class="lg-n" id="lg-b2a">0</span></li>
           <li><span class="lg-dash" style="border-color:var(--err)"></span>Refused</li>
           <li><span class="lg-dash" style="border-color:var(--faint)"></span>Disabled</li>
         </ul>
       </div>
       <div class="topo-grid">
-        <p class="topo-cap a">side A · sends</p>
+        <p class="topo-cap a">side A</p>
         <p class="topo-cap">gateway</p>
-        <p class="topo-cap b">side B · receives</p>
+        <p class="topo-cap b">side B</p>
         <div class="topo-col" id="topo-a"></div>
         <div class="topo-mid" id="topo-mid"></div>
         <div class="topo-col" id="topo-b"></div>
@@ -464,7 +474,10 @@
       <h2 class="sr-only" id="rollup-title">Per-integration rollup</h2>
       <div class="tablewrap"><table class="rtable">
         <thead><tr>
-          <th scope="col">Integration</th><th scope="col">Requests</th><th scope="col">Delivered</th>
+          <th scope="col">Integration</th><th scope="col">Requests</th>
+          <th scope="col" title="Requests from side A to side B">A → B</th>
+          <th scope="col" title="Requests from side B to side A">B → A</th>
+          <th scope="col">Delivered</th>
           <th scope="col">Refused</th><th scope="col">Failed</th><th scope="col">Avg ms</th>
           <th scope="col">Fields</th><th scope="col">Data</th><th scope="col">Last seen</th>
         </tr></thead>
@@ -1386,6 +1399,8 @@ function renderDashHead(s, lanes) {
     `<span class="${s.total && s.success_pct < 90 ? "warn" : "good"}">${pct} delivered</span> · ` +
     `${esc(fmtCount(s.applied))} ${plural(s.applied, "field")} renamed in flight · ` +
     `${live} ${plural(live, "lane")} live · since start`;
+  $("lg-a2b").textContent = fmtCount(s.a2b);
+  $("lg-b2a").textContent = fmtCount(s.b2a);
 }
 
 /* ---- topology ---- */
@@ -1400,6 +1415,12 @@ function laneNode(l, side) {
     `<span class="lane-host">${esc(hostOf(ep.target_url))}</span></span>` +
     `<span class="lane-port"></span></button>`;
 }
+
+/* Which ways a lane has carried requests: [A to B, B to A]. */
+function laneFlow(l) {
+  return [(l.st.a2b || 0) > 0, (l.st.b2a || 0) > 0];
+}
+const dirText = (st) => `A → B ${fmtCount(st.a2b)}\nB → A ${fmtCount(st.b2a)}`;
 
 function topoMid(lanes, width, height) {
   const n = lanes.length;
@@ -1416,30 +1437,43 @@ function topoMid(lanes, width, height) {
   let svg = `<svg class="topo-svg" width="${width}" height="${height}" aria-hidden="true"><defs>` +
     `<pattern id="topo-dots" width="14" height="14" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="0.9" class="grid-dot"/></pattern>` +
     `</defs><rect width="${width}" height="${height}" fill="url(#topo-dots)"/>`;
+  // One dot on a wire. `back` runs it from the wire's far end to its near
+  // end: traffic going the other way along the same wire.
+  const dot = (cls, path, at, back) => `<circle r="3.5" class="${cls}"><animateMotion dur="1.8s" ` +
+    `repeatCount="indefinite" begin="${f(-at)}s" ${back ? `keyPoints="1;0" keyTimes="0;1" calcMode="linear" ` : ""}` +
+    `path="${path}"/></circle>`;
+  // A request that stops short of the gateway: refused at the door.
+  const refused = (path, back) => `<circle r="3.5" class="dot-bad"><animateMotion dur="2.4s" repeatCount="indefinite" ` +
+    `keyPoints="${back ? "1;0.2;0.2" : "0;0.8;0.8"}" keyTimes="0;0.6;1" calcMode="linear" path="${path}"/></circle>`;
+
   let tags = "", ports = "";
   lanes.forEach((l, i) => {
     const id = esc(l.acct.id), on = l.status === "enabled", locked = l.status === "locked";
-    const line = on ? (MOTION ? " flow" : "") : " dash";
+    const [fwd, back] = laneFlow(l);
+    // A hovered wire's dashes march with its traffic, and stand still when
+    // it runs both ways or has not run at all.
+    const line = !on ? " dash" : !MOTION || fwd === back ? "" : back ? " flow rev" : " flow";
     svg += `<g class="wire" data-lane="${id}">` +
       `<path d="${left(i)}" class="${on ? "w-a" : locked ? "w-bad" : "w-off"}${line}"/>` +
       `<path d="${right(i)}" class="${on ? "w-b" : "w-off"}${line}"/>`;
-    if (MOTION && on && (l.st.total || 0) > 0) {
+    if (MOTION && on) {
       for (const k of [0, 1]) {
         const b = k * 0.9 + i * 0.37;
-        svg += `<circle r="3.5" class="dot-a"><animateMotion dur="1.8s" repeatCount="indefinite" begin="${f(-b)}s" path="${left(i)}"/></circle>` +
-          `<circle r="3.5" class="dot-b"><animateMotion dur="1.8s" repeatCount="indefinite" begin="${f(-b - 0.45)}s" path="${right(i)}"/></circle>`;
+        if (fwd) svg += dot("dot-a", left(i), b) + dot("dot-b", right(i), b + 0.45);
+        if (back) svg += dot("dot-b", right(i), b + 0.2, true) + dot("dot-a", left(i), b + 0.65, true);
       }
     }
-    // A locked lane's request runs most of the way in and stops short of
-    // the gateway: refused at the door.
+    // A locked lane refuses at the door of whichever side has been
+    // knocking; side A's when nothing has been seen yet.
     if (MOTION && locked) {
-      svg += `<circle r="3.5" class="dot-bad"><animateMotion dur="2.4s" repeatCount="indefinite" ` +
-        `keyPoints="0;0.8;0.8" keyTimes="0;0.6;1" calcMode="linear" path="${left(i)}"/></circle>`;
+      if (fwd || !back) svg += refused(left(i));
+      if (back) svg += refused(right(i), true);
     }
     svg += `</g>`;
     if (locked) {
       tags += `<span class="lock-tag" data-lane="${id}" style="left:${f(hubL * 0.5)}px;top:${f((rowY(i) + portY(i)) / 2)}px">429 locked</span>`;
     }
+    tags += `<span class="dir-tag" data-lane="${id}" style="left:${f(bend)}px;top:${f((rowY(i) + portY(i)) / 2)}px">${dirText(l.st)}</span>`;
     const top = f(portY(i) - hubTop);
     ports += `<span class="hub-port l ${on ? "hp-a" : locked ? "hp-bad" : "hp-off"}" style="top:${top}px"></span>` +
       `<span class="hub-port r ${on ? "hp-b" : "hp-off"}" style="top:${top}px"></span>`;
@@ -1452,8 +1486,10 @@ function topoMid(lanes, width, height) {
     `<p class="hub-ms" id="topo-ms"></p></div>`;
 }
 
-/* Rebuilt only when the shape changes (width, lanes, status), never on a
-   plain poll: rebuilding restarts every travelling dot mid-flight. */
+/* Rebuilt only when the shape changes (width, lanes, status, which ways a
+   lane has traffic), never on a plain poll: rebuilding restarts every
+   travelling dot mid-flight. The counts on the hover tags are the one
+   thing a poll does rewrite, in place. */
 function renderTopo() {
   const D = S.dash, mid = $("topo-mid");
   if (!D.lanes) return;
@@ -1462,7 +1498,7 @@ function renderTopo() {
   mid.style.height = height + "px";
   const width = Math.round(mid.getBoundingClientRect().width);
   const key = width + "|" + lanes.map(l => [l.acct.id, l.status, l.acct.a.label, l.acct.b.label,
-    l.acct.a.target_url, l.acct.b.target_url, (l.st.total || 0) > 0].join("\u0001")).join("\u0002");
+    l.acct.a.target_url, l.acct.b.target_url, laneFlow(l).join()].join("\u0001")).join("\u0002");
   if (key !== D.topoKey) {
     $("topo-a").innerHTML = lanes.map(l => laneNode(l, "a")).join("") ||
       `<p class="topo-none">No integrations yet</p>`;
@@ -1475,6 +1511,11 @@ function renderTopo() {
   const fl = $("topo-fields"), ms = $("topo-ms");
   if (fl) fl.textContent = D.fields;
   if (ms) ms.textContent = D.ms;
+  const byId = new Map(lanes.map(l => [l.acct.id, l]));
+  mid.querySelectorAll(".dir-tag").forEach(el => {
+    const l = byId.get(el.dataset.lane);
+    if (l) el.textContent = dirText(l.st);
+  });
 }
 let topoWidth = 0;
 new ResizeObserver(([e]) => {
@@ -1513,7 +1554,7 @@ function renderTicker(animate) {
   const el = document.createElement("div");
   el.className = "tick" + (animate ? " in" : "");
   el.innerHTML = `<span class="ta">${esc(cur.from)}</span>` +
-    `<span class="tb">→ ${esc(cur.to)}${cur.fx ? `<span class="fx">fx</span>` : ""}</span>`;
+    `<span class="tb">↔ ${esc(cur.to)}${cur.fx ? `<span class="fx">fx</span>` : ""}</span>`;
   box.querySelectorAll(".tick-none, .tick.out").forEach(x => x.remove());
   const old = box.querySelector(".tick");
   if (old && animate) { old.classList.add("out"); setTimeout(() => old.remove(), 240); }
@@ -1601,6 +1642,8 @@ function rollRow(id, who, st, open) {
   return `<tr${open ? ` tabindex="0" data-id="${esc(id)}"` : ""}>` +
     `<td><div class="rid"><span class="rid-id">${esc(id)}</span>${who}</div></td>` +
     `<td>${fmtCount(st.total)}</td>` +
+    `<td>${fmtCount(st.a2b)}</td>` +
+    `<td>${fmtCount(st.b2a)}</td>` +
     `<td class="good">${fmtCount(st.ok)}</td>` +
     `<td class="${refused ? "bad" : ""}">${fmtCount(refused)}</td>` +
     `<td class="${failed ? "bad" : ""}">${fmtCount(failed)}</td>` +

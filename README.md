@@ -33,7 +33,7 @@ XLATE_ADMIN_TOKEN=... ./xlate -state /var/lib/xlate/state.json \
   -alert-webhook https://ops.example/hooks/xlate -alert-secret "$SECRET"
 ```
 
-Open `http://localhost:8080/admin/`, sign in with the admin token (see [Signing in](#signing-in)), create an account, add field pairs (the **fx** button on a pair adds a date transform), and hand each party its curl snippet from the Integration card. The console opens on a **Dashboard**: every integration as a lane through the gateway, the per-minute chart, node vitals and a per-integration rollup. It ships in a light theme with a toggle in the top right, remembered per browser.
+Open `http://localhost:8080/admin/`, sign in with the admin token (see [Signing in](#signing-in)), create an account, add field pairs (the **fx** button on a pair adds a date transform), and hand each party its curl snippet from the Integration card. The console opens on a **Dashboard**: every integration as a lane through the gateway with its traffic drawn running both ways, the per-minute chart, node vitals and a per-integration rollup. It ships in a light theme with a toggle in the top right, remembered per browser.
 
 Want it populated? `./demo/demo.ps1` (or `demo.sh`) brings up the gateway, a mock destination, four dummy accounts and traffic in one command — see [demo/README.md](demo/README.md).
 
@@ -315,6 +315,10 @@ The `no_target` check runs *after* decoding so an unwired account still yields i
 ## Dashboard
 
 `GET /api/admin/stats`, and the console's landing tab. Lifetime counters for the node — total requests, delivered, refused (split into unauthorised, locked out and rate limited), upstream failures, fields translated, warnings, bytes relayed, average and peak latency, uptime — plus a per-account rollup and a rolling per-minute series for the last hour.
+
+Requests are also counted by direction, as `a2b` and `b2a`, for the node and on every account row. A request counts in the direction of the route it was sent to, whatever became of it, so a refused call to `/t/{id}/b2a` is a `b2a` request and `a2b + b2a` always equals `total`. The fields are additions: every existing field keeps its name and meaning.
+
+The topology draws each lane from those counts. Dots run A to B on a lane that has carried requests that way and B to A on one that has carried them back, both at once where it has seen both; a lane that has seen neither draws none. A locked lane shows its refusals at the side that has been knocking, or at both. Hovering a lane tags it with its two counts, the legend carries the node totals, and the rollup has a column for each direction.
 
 The activity ring answers *what just happened* and holds only the last `-log-size` requests. These counters answer *what has this node done*, which the ring cannot: it forgets. They are in-memory and reset on restart, deliberately — durable metrics belong in whatever scrapes the node, not in a gateway trying to stay a single dependency-free binary. Counters only: no payloads, no identifiers.
 
