@@ -51,7 +51,7 @@ At startup xlate uses the first of these that is set:
 
 ```text
 $ ./xlate -listen :8080
-2026/10/25 21:25:27 xlate 0.4.1 listening on :8080
+2026/10/25 21:25:27 xlate 0.5.0 listening on :8080
 2026/10/25 21:25:27 admin ui: http://localhost:8080/admin/
 2026/10/25 21:25:27 state: xlate.state.json (0 accounts)
 2026/10/25 21:25:27 audit: xlate.audit.jsonl (verify anytime: xlate -verify-audit xlate.audit.jsonl)
@@ -448,7 +448,7 @@ Two consequences worth knowing before you deploy:
 - **A successful request is dominated by the outbound call**, not by xlate. Your real ceiling is the destination's latency and connection pool, and the per-account `timeout_sec` bounds how long a slow destination can tie up a request.
 - **Refused requests cost an fsync, shared between concurrent callers.** `ingest.denied` and `ingest.blocked` are security-relevant, so each record is on disk before the request moves on, and a caller on its own still waits out a whole fsync (about 1.4 ms). Concurrent callers share: while an fsync runs the others write their records, and the next fsync makes all of them durable at once. Routine records such as `ingest.ok` no longer queue behind it. On this machine 16 concurrent refused requests went from about 750 to about 4 000 req/s (`BenchmarkIngestRejected` at 16 CPUs); on Linux, in a container on WSL2, the fsynced audit write at 16 callers fell from 1.6 ms to 0.2 ms. A tripwire lockout does not relieve the cost: it converts fsynced 401s into fsynced 429s. For credential-guessing floods at volume, put a rate limiter in front (the tripwire is an anomaly detector, not a limiter), or move the trail to faster storage. The per-account [rate limit](#rate-limits) meters authenticated callers only, so it does not help there.
 
-## Security posture (0.3)
+## Security posture
 
 - Token comparisons are constant-time over SHA-256 digests.
 - Tokens are stored **plaintext** in the state file (outbound credentials must be reversible; inbound/admin follow for simplicity). Mitigate with file perms (`0600`) and host controls; hashing inbound + admin tokens is on the roadmap.
@@ -469,10 +469,10 @@ Two consequences worth knowing before you deploy:
 ## Deploying
 
 ```sh
-docker build -t xlate:0.4.1 .
+docker build -t xlate:0.5.0 .
 docker run -d --name xlate -p 8080:8080 \
   -e XLATE_ADMIN_TOKEN="$(openssl rand -hex 32)" \
-  -v xlate-data:/var/lib/xlate xlate:0.4.1
+  -v xlate-data:/var/lib/xlate xlate:0.5.0
 ```
 
 The image is `distroless/static` running as `nonroot`: the binary, CA certs, and nothing else — no shell, no package manager. State and the audit trail live on the mounted volume. A named volume (as above) inherits the correct ownership from the image; with a **bind mount** instead, `chown 65532:65532` the host directory first or the non-root process cannot create its files.
@@ -495,7 +495,7 @@ If a write fails — full disk, read-only mount — the in-memory state is rolle
 
 A corrupt or truncated state file stops the process at startup rather than quietly coming up with no accounts and refusing live traffic.
 
-## Deliberately out of scope for 0.3
+## Deliberately out of scope
 
 Enum/type value transforms, arrays of scalars and arrays inside arrays, forwarding the caller's URL path, HEAD and OPTIONS, retries/DLQ for failed forwards, HMAC signing of *data-plane* requests, multi-user admin (OIDC), SQLite backend, off-host audit shipping.
 

@@ -24,7 +24,7 @@ import (
 	"time"
 )
 
-const version = "0.4.1"
+const version = "0.5.0"
 
 //go:embed web/admin.html
 var adminHTML []byte
