@@ -1,7 +1,7 @@
 # Build a static binary, then ship it on a base with nothing else on it.
 # The admin console is embedded, so the final image is one file plus certs.
-# golang:1.26.10-alpine
-FROM golang@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS build
+# golang:1.26.11-alpine
+FROM golang@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS build
 WORKDIR /src
 
 # Nothing outside the standard library, so there is nothing to download —
