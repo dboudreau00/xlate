@@ -20,7 +20,7 @@ Bidirectional REST field-translation gateway. Two systems that speak different f
 
 Single static Go binary, standard library only. Admin console is one embedded HTML file — no build step. State is one JSON file, written durably (temp → fsync → rename → fsync the directory) with `0600` perms, and rolled back in memory if the write fails. Every security-relevant action lands on a hash-chained audit trail, and a tripwire watches for credential-guessing against any account.
 
-New here? **[TUTORIAL.md](TUTORIAL.md)** walks you from zero to two systems talking, in about fifteen minutes.
+New here? **[TUTORIAL.md](TUTORIAL.md)** walks you from zero to two systems talking, in about fifteen minutes. The design trade-offs and known limits are in [Architecture, design trade-offs and known limitations](#architecture-design-trade-offs-and-known-limitations).
 
 ## Quickstart
 
@@ -511,6 +511,33 @@ Writes are temp file → `fsync` → `rename` → `fsync` the directory. The ren
 If a write fails — full disk, read-only mount — the in-memory state is rolled back to match what is actually on disk. Otherwise the API would report an error while the change stayed live: the account would serve traffic, appear in listings, and vanish on the next restart. `Rotate` gets its own rollback because it edits the account in place; a half-applied rotation would kill the old token without persisting the new one and lock the partner out.
 
 A corrupt or truncated state file stops the process at startup rather than quietly coming up with no accounts and refusing live traffic.
+
+## Architecture, design trade-offs and known limitations
+
+### Architecture
+
+One process, three parts. The **data plane** (`/t/{account}/{a2b|b2a}`) runs every request through the same fixed pipeline: method check, tripwire gate, authentication, rate limit, validation, request translation, forward with the destination's own credential, response translation. The **control plane** is the admin API and the embedded console at `/admin/`. **State** is one JSON file and a hash-chained JSONL audit trail, both owned by that process. The translation engine (`translate.go`) does no I/O, so it is tested directly as well as through the server. The file-by-file layout is under [Layout](#layout).
+
+### Design trade-offs
+
+- **One JSON file, not a database.** The whole deployment is a single file you can back up, diff and restore, and every write is atomic and fsynced. The cost is a single node: run one instance per state file. Rate-limit buckets and `lock`-mode tripwire state live in memory, per instance, and reset on restart.
+- **Plaintext tokens in that file.** Outbound tokens have to be readable to be sent, and inbound and admin tokens follow for simplicity. The protection is the `0600` mode and host controls. Hashing inbound and admin tokens is on the roadmap.
+- **Fail open on a bad value, closed on request.** A date that cannot be converted is forwarded untouched with a warning, because rejecting a whole request over one field is the worse default for a pass-through gateway. An account that cannot tolerate a value in the wrong representation turns on [strict transforms](#strict-transforms).
+- **Refusals are durable, so they cost an fsync.** Denials and blocks reach disk before the request moves on. Concurrent callers share fsyncs, but a lone refused request still waits about 1.4 ms, and a flood of them is limited by disk speed. Put a rate limiter in front: the tripwire is an anomaly detector, not a limiter.
+- **The tripwire closes the account, not the source.** Failures are counted per account, so rotating source addresses does not evade it, and the gate sits in front of authentication. In `lock` mode valid credentials are refused as well until the lock expires, so anyone who knows an account ID can lock that integration out by sending bad tokens. `alert` mode notifies without containing.
+- **Isolation is by leaf field.** An object emptied by a move stays in place, because silently pruning containers is more surprising than an empty object, so a parent name can still cross. Unmapped fields pass through unless **drop unmapped** is set.
+- **Standard library only, flat `package main`.** There is no third-party code to audit or patch, and the result is one static binary. The price is that what a library would supply, such as OIDC sign-in or a database backend, is out of scope.
+- **Redirects are returned, never followed.** Credentials and the alert signature never reach a `Location` target. The caller sees the `3xx`.
+
+### Known limitations
+
+- Single node. Two instances behind a balancer each enforce rate limits on their own.
+- The audit trail is tamper-evident, not tamper-proof. Someone with write access and the code can rebuild the chain, so ship the trail off-host and compare tails for a stronger guarantee.
+- Target URLs are admin-supplied and unrestricted, so an untrusted admin is an SSRF primitive. Egress-filter the host.
+- Unknown accounts answer `404` before the tripwire, so account IDs can be probed without being counted.
+- Throughput peaks near 32 in-flight requests (about 3,500 req/s in the benchmark above) and falls past that. Cap concurrency in front.
+- The only value transform is date conversion. Arrays are mapped one level deep, plus a top-level array.
+- Everything else that is not supported is listed under [Deliberately out of scope](#deliberately-out-of-scope).
 
 ## Deliberately out of scope
 
